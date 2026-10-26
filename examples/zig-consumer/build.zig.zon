@@ -1,0 +1,11 @@
+.{
+    .name = .zig_consumer_example,
+    .version = "0.1.0",
+    .fingerprint = 0x5f4eb3dd0d5971f2,
+    .dependencies = .{
+        .zqr = .{
+            .path = "../..",
+        },
+    },
+    .paths = .{""},
+}
