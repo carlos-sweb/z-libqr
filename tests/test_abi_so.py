@@ -157,9 +157,20 @@ def main():
         (3, 40, "libzqr_t3.so", "libzqr_t3.so.1", "zqr_t3"),
     ]
 
+    missing = [so_name for _, _, so_name, _, _ in tiers if not os.path.exists(os.path.join(lib_dir, so_name))]
+    if missing:
+        print(f"Shared libraries missing ({', '.join(missing)}). Attempting to run 'zig build'...")
+        try:
+            subprocess.run(["zig", "build"], cwd=repo_root, check=True)
+        except Exception:
+            print("Error: Missing .so files. Run `zig build` first, then re-run this script.", file=sys.stderr)
+            sys.exit(1)
+
     for tier_num, max_v, so_name, soname, prefix in tiers:
         so_path = os.path.join(lib_dir, so_name)
-        assert os.path.exists(so_path), f"Library not found: {so_path}"
+        if not os.path.exists(so_path):
+            print(f"Error: Missing .so files ({so_name}). Run `zig build` first, then re-run this script.", file=sys.stderr)
+            sys.exit(1)
         print(f"\n[Tier {tier_num}] Testing {so_name}:")
         verify_soname(so_path, soname)
         verify_exported_symbols(so_path, prefix)

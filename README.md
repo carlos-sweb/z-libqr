@@ -115,9 +115,16 @@ assert rc == 0
 
 ## Verification & Testing
 
-- `zig build test`: Runs unit tests across all modules and 54 bit-by-bit golden fixture vectors.
-- `zig build test-c-integration`: Compiles and runs the native C ABI integration suite, linking all 3 `.a` archives simultaneously.
-- `python3 tests/test_abi_so.py`: Validates `.so` loading, SONAME tags, and symbol isolation.
+Recommended verification order:
+
+```bash
+zig build                      # Generates .a and .so libraries in zig-out/lib
+zig build test                 # Runs unit tests, golden fixtures, and C integration
+python3 tests/test_abi_so.py   # Validates FFI loading, SONAME tags, and symbol isolation
+```
+
+Additional testing commands:
+- `zig build test-c-integration`: Compiles and runs the native C ABI integration suite standalone (linking all 3 `.a` archives simultaneously).
 - `python3 tools/gen_vectors.py --exhaustive`: Verifies all 1280 possible (version × ECC × mask) combinations bit-by-bit against Project Nayuki's reference implementation.
 
 ## License

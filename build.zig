@@ -79,10 +79,12 @@ pub fn build(b: *std.Build) void {
             .version = zqr_version,
         });
 
-        b.installArtifact(static_lib);
-        b.installArtifact(dynamic_lib);
-        test_step.dependOn(&static_lib.step);
-        test_step.dependOn(&dynamic_lib.step);
+        const install_static = b.addInstallArtifact(static_lib, .{});
+        const install_dynamic = b.addInstallArtifact(dynamic_lib, .{});
+        b.getInstallStep().dependOn(&install_static.step);
+        b.getInstallStep().dependOn(&install_dynamic.step);
+        test_step.dependOn(&install_static.step);
+        test_step.dependOn(&install_dynamic.step);
     }
 
     // C ABI integration test: links all 3 static libraries simultaneously into one C binary,
@@ -111,7 +113,9 @@ pub fn build(b: *std.Build) void {
     test_c_step.dependOn(&run_c_integration.step);
     test_step.dependOn(&run_c_integration.step);
 
-    b.installFile("include/zqr.h", "include/zqr.h");
+    const install_header = b.addInstallFile(b.path("include/zqr.h"), "include/zqr.h");
+    b.getInstallStep().dependOn(&install_header.step);
+    test_step.dependOn(&install_header.step);
 
     const fmt_step = b.step("fmt", "Check source formatting (zig fmt --check)");
     fmt_step.dependOn(&b.addFmt(.{
