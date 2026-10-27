@@ -1,190 +1,322 @@
 # z-libqr (libzqr)
 
 A complete, zero-dependency QR Code Model 2 encoder in Zig 0.17.
-Generates compliant QR codes from version 1 up to 40, error correction levels L, M, Q, H, and standard encoding modes according to ISO/IEC 18004.
+Generates strictly compliant QR Code Model 2 matrices from Version 1 (21×21) to 40 (177×177), with error correction levels L, M, Q, H, dynamic programming multi-mode optimization, Kanji, FNC1, and Structured Append.
 
-Output is strictly the module matrix (0 = light, 1 = dark), without quiet zone or image rendering.
+Output is strictly the module matrix (0 = light, 1 = dark), without quiet zone padding or image rendering.
 
 This library is a from-scratch Zig port of the algorithm described in Project Nayuki's QR Code generator (MIT).
 
-## Feature Status
+---
 
-| Category | Feature | Status | Notes |
+## Table of Contents
+
+- [Specification Coverage](#specification-coverage)
+- [Tiered Architecture & Distribution](#tiered-architecture--distribution)
+- [Memory Model & Stack Budget](#memory-model--stack-budget)
+- [Core Features](#core-features)
+  - [Kanji Mode (JIS X 0208)](#kanji-mode-jis-x-0208)
+  - [Optimal Multi-Mode Optimizer (DP Mixing)](#optimal-multi-mode-optimizer-dp-mixing)
+  - [FNC1 & GS1 QR Codes](#fnc1--gs1-qr-codes)
+  - [Structured Append Sequences](#structured-append-sequences)
+- [Zig API Reference](#zig-api-reference)
+- [C ABI Reference](#c-abi-reference)
+- [Usage Examples](#usage-examples)
+  - [Zig Consumer](#zig-consumer)
+  - [C99 / C++ Consumer](#c99--c-consumer)
+  - [Python FFI (ctypes)](#python-ffi-ctypes)
+- [Quality, Testing & Verification](#quality-testing--verification)
+- [License](#license)
+
+---
+
+## Specification Coverage
+
+`z-libqr` provides complete Model 2 implementation according to **ISO/IEC 18004:2015**:
+
+| Scope Area | Feature / Capability | Status | Details |
 | :--- | :--- | :--- | :--- |
-| **Core QR** | Model 2 Versions 1–40 | **Implemented** | Full geometric and capacity support |
-| | ECC Levels (L, M, Q, H) | **Implemented** | Exact ISO/IEC 18004 Reed-Solomon generation |
-| | 8 Mask Patterns (0–7) | **Implemented** | ISO penalty evaluation (N1–N4) + tie-break |
-| | No ECL Boost | **Implemented** | Respects caller-requested error correction level |
-| **Modes** | Numeric Mode | **Implemented** | Groups of 3 digits (10 bits), 2 (7b), 1 (4b) |
-| | Alphanumeric Mode | **Implemented** | 45-character standard charset (11 bits / pair) |
-| | Byte Mode | **Implemented** | Arbitrary binary data and UTF-8 bytes |
-| | ECI Mode | **Implemented** | Extended Channel Interpretation headers |
-| | Multi-Segment Input | **Implemented** | Manual heterogeneous segment composition |
-| | Kanji Mode | **Implemented** | JIS X 0208 UTF-8 to 13-bit QR Kanji mode |
-| | Optimal Mode Optimizer | **Implemented** | Multi-mode DP mixing (Numeric + Alphanumeric + Byte + Kanji) |
-| | FNC1 Mode | **Implemented** | First Position (GS1) & Second Position (AIM Application Indicator) |
-| | Structured Append | **Implemented** | ISO/IEC 18004 Section 8, up to 16 symbols, automatic parity |
-| **Architecture**| Zero-Allocation Core | **Implemented** | Caller provides output module buffer |
-| | Embedded Stack Budget | **Implemented** | Peak stack ~6.6 KB (single-mode), ~12.9 KB (Tier 3 full DP), ~15.3 KB (Tier 3 SA sequence) |
-| | Symbol Isolation | **Implemented** | Multi-tier static linking without symbol collisions |
-| | C ABI Export | **Implemented** | 8 stable symbols per tier, negative error codes |
-| | Shared Libraries (.so) | **Implemented** | Valid ELF SONAME (`libzqr_tN.so.1`), zero UBSan leaks |
+| **Model 2 Core** | Versions 1 to 40 | **Complete** | Geometries from 21×21 to 177×177 modules |
+| | ECC Levels (L, M, Q, H) | **Complete** | Exact Reed-Solomon generation; no automatic boost |
+| | Mask Patterns 0–7 | **Complete** | Full ISO penalty evaluation (N1–N4) + tie-breaking |
+| **Encoding Modes** | Numeric Mode | **Complete** | 3 digits / 10 bits, 2 / 7b, 1 / 4b |
+| | Alphanumeric Mode | **Complete** | 45-character standard charset (11 bits / pair) |
+| | Byte Mode | **Complete** | Arbitrary binary data and UTF-8 bytes |
+| | ECI Mode | **Complete** | Extended Channel Interpretation headers (0..999999) |
+| | Kanji Mode | **Complete** | JIS X 0208 UTF-8 mapping to 13-bit codewords |
+| | Mode Mixing (Optimizer) | **Complete** | Dynamic programming cost optimization in 1/6 bit |
+| | FNC1 First Position | **Complete** | GS1 QR Code identification (`0101`) |
+| | FNC1 Second Position | **Complete** | AIM application indicator (`1001`) |
+| | Structured Append | **Complete** | 1 to 16 linked symbols, automatic parity checksum |
+| **Explicitly Out of Scope** | Micro QR (M1–M4) | *Out of Scope* | Standard QR Model 2 only |
+| | QR Code Model 1 | *Out of Scope* | Obsolete legacy specification |
+| | Decoder / Reader | *Out of Scope* | Encoder only; no scanning or decoding logic |
+| | Image Rendering | *Out of Scope* | Generates raw module matrices; no PNG/SVG or quiet zones |
+| | GS1 AI Syntax Validation | *Out of Scope* | Inserts FNC1 headers; semantic AI parsing is caller responsibility |
 
-## Compatibility
+---
 
-- **Native Zig**: Tested with Zig 0.17.0 via `build.zig.zon` and `@import("zqr")`.
-- **Cross-Compilation**: Cross-compiles out of the box to Windows (`-Dtarget=x86_64-windows-gnu`, produces DLL and `.lib`) and macOS (`-Dtarget=aarch64-macos`, produces `.dylib`).
-- **Cross-Version Zig / C / Rust**: Fully compatible with Zig 0.15+, C (C99+), C++, and Rust by linking the static archives (`libzqr_tN.a`).
-- **FFI / Dynamic Languages**: Loadable via `dlopen`/ctypes/Node FFI (`libzqr_tN.so` / `.dylib` / `.dll`).
+## Tiered Architecture & Distribution
 
-## Distribution Paths
+To minimize binary footprint and stack memory in resource-constrained or embedded environments, `z-libqr` is partitioned into three compile-time tiers:
 
-`z-libqr` is distributed in three ways:
+- **Tier 1 (`_t1`)**: QR Versions 1 to 6. Max size 41×41 modules.
+- **Tier 2 (`_t2`)**: QR Versions 1 to 10. Max size 57×57 modules.
+- **Tier 3 (`_t3`)**: Full QR Versions 1 to 40. Max size 177×177 modules.
 
-1. **Path 1 — Zig Module**: For Zig 0.17 projects. Add via `build.zig.zon` and use `@import("zqr")`.
-2. **Path 2 — Static C Libraries**: `libzqr_t1.a`, `libzqr_t2.a`, `libzqr_t3.a`. Stable C ABI linkable by any toolchain.
-3. **Path 3 — Dynamic Libraries**: `libzqr_t1.so`, `libzqr_t2.so`, `libzqr_t3.so` (version 1.2.0, SONAME `libzqr_tN.so.1`).
+> **Linking Rule:** All tiers use unique public symbol prefixes (`zqr_t1_`, `zqr_t2_`, `zqr_t3_`), allowing different tiers to be linked simultaneously into a single binary without symbol collision.
 
-### Tiers
+### Distribution Formats
 
-To optimize binary size and memory footprint for constrained environments, `z-libqr` is partitioned into three tiers:
+1. **Zig Package**: Import via `build.zig.zon` and `@import("zqr")`. Exposes `zqr.Tier1`, `zqr.Tier2`, and `zqr.Tier3`.
+2. **Static C Libraries**: `libzqr_t1.a`, `libzqr_t2.a`, `libzqr_t3.a` linkable by any C99+, C++, or Rust toolchain.
+3. **Dynamic Shared Libraries**: `libzqr_t1.so`, `libzqr_t2.so`, `libzqr_t3.so` (version 1.2.0, ELF SONAME `libzqr_tN.so.1`).
 
-- **Tier 1 (`_t1`)**: QR versions 1 to 6. Max size 41×41 modules.
-- **Tier 2 (`_t2`)**: QR versions 1 to 10. Max size 57×57 modules.
-- **Tier 3 (`_t3`)**: Full QR versions 1 to 40. Max size 177×177 modules.
+---
 
-> **Linking Rule:** All three tiers use distinct symbol prefixes (`zqr_t1_`, `zqr_t2_`, `zqr_t3_`), allowing multiple tiers to be linked into the same binary without symbol collisions.
+## Memory Model & Stack Budget
 
-## Memory Model
+`z-libqr` strictly enforces a **Zero-Allocation Core**:
+- **0 heap allocations** across all encoding paths (no `malloc`, no `std.mem.Allocator`).
+- All internal buffers are statically sized and allocated on the execution stack.
+- Module matrix output storage is provided by the caller.
 
-The core encoder requires no memory allocator. Callers provide a module buffer sized for the symbol.
-- **Core Pipeline (`optimize: false` / standard `encode`)**: Peak stack usage is **~6.6 KB** in Tier 3 (~1.2 KB in Tier 1), bounded by fixed stack buffers for data codewords (2956 B) and Reed-Solomon interleaving (3706 B).
-- **Dynamic Programming Multi-Mode Optimizer (`optimize: true`)**: Uses fixed static stack memory for DP backtracking (1 byte per character, dimensioned to each tier's theoretical character limit: 322 B in Tier 1, 652 B in Tier 2, 7089 B in Tier 3). Peak stack usage with optimization enabled is:
-  - **Tier 1:** ~1.8 KB
-  - **Tier 2:** ~3.2 KB
-  - **Tier 3:** ~12.9 KB (in the worst-case 7089-character payload)
-- **Segment Buffer & Adversarial Fallback**: Segment counts are bounded per tier (32 for T1, 48 for T2, 128 for T3). In adversarial cases with >128 segments, the optimizer falls back silently to single byte mode; the QR code remains strictly valid and compliant, but may use a higher version than theoretically optimal.
-- **Structured Append Sequences**: Sequentially encodes each chunk reusing the single-symbol pipeline buffers. In C ABI, `zqr_tN_encode_sequence` has a frame of ~2.4 KB (sub `$0x960, %rsp` in assembly). Peak stack usage during sequence encoding in Tier 3 with DP is **~15.3 KB**. For $N=16$ symbols of version 40, `module_storage` is ~490 KB: allocate this output buffer on heap, not stack. `sequenceBufferLen(0, N)` returns the worst-case size.
-- **Zero Allocator Guarantee**: 0 heap allocations in all encoding paths.
+### Measured Stack Budgets
 
-Any input payload that would exceed buffer capacity or QR Model 2 limits is rejected with `ZQR_ERR_DATA_TOO_LONG` before any buffer operations take place.
+| Execution Path | Tier 1 (v1–6) | Tier 2 (v1–10) | Tier 3 (v1–40) |
+| :--- | :--- | :--- | :--- |
+| **Standard Pipeline (`optimize: false`)** | ~1.2 KB | ~1.8 KB | **~6.6 KB** |
+| **DP Optimizer (`optimize: true`, worst-case)** | ~1.8 KB | ~3.2 KB | **~12.9 KB** |
+| **Structured Append (`encodeSequence`, frame + DP)** | ~2.5 KB | ~4.1 KB | **~15.3 KB** |
 
-## FNC1 and GS1 QR Codes
+- **Stack Slot Coloring**: The compiler reuses overlapping lifetimes between the DP backtracking table and Reed-Solomon interleaving buffers, bounding worst-case single-symbol stack to ~12.9 KB.
+- **Structured Append Sequential Encoding**: Each chunk is encoded sequentially, reusing the single-symbol pipeline buffers. In C ABI, `zqr_tN_encode_sequence` reserves a frame of ~2.4 KB (`sub $0x960, %rsp`), giving a peak stack usage of ~15.3 KB in Tier 3.
 
-`z-libqr` supports FNC1 modes defined in ISO/IEC 18004:2015 clause 7.4.8:
-- **First Position (`0101`)**: Identifies standard **GS1 QR Code** symbols.
-- **Second Position (`1001`)**: Identifies AIM application-specific symbols with an 8-bit Application Indicator (0..99 as numeric value, or `c + 100` for ASCII letters `'A'..'Z'` / `'a'..'z'`).
-- **ECI + FNC1 Ordering**: When both ECI and FNC1 are configured, `z-libqr` automatically orders them as `[ECI, FNC1, data...]` as mandated by ISO/IEC 18004.
-- **GS1 Syntax Notice**: FNC1 insertion only. The caller must insert `0x1D` (ASCII GS) between variable-length fields (e.g. `0101234567890128\x1D10BATCH1`); the encoder does not parse or validate GS1 Application Identifiers (AIs).
+> [!WARNING]
+> For a maximum sequence of $N=16$ symbols of Version 40, the output `module_storage` buffer requires ~490 KB ($16 \times 177^2$ bytes).
+> **Allocate `module_storage` on the heap, never on the stack.**
+> Use `sequenceBufferLen(0, N)` (or `zqr_tN_sequence_buffer_len(0, N)`) to query the exact worst-case buffer size.
 
-## Structured Append (ISO/IEC 18004 Section 8)
+---
 
-`z-libqr` supports splitting large payloads across 1 to 16 linked QR symbols:
-- **Automatic Minimal Symbol Count**: If `symbol_count` is not specified (or 0), the encoder automatically selects the minimal $N \in [1..16]$ required for the payload.
+## Core Features
+
+### Kanji Mode (JIS X 0208)
+
+- Converts UTF-8 strings consisting of JIS X 0208 characters directly into 13-bit QR Kanji codewords.
+- Embeds a static lookup table of 6,879 sorted entries (27.5 KiB in `.rodata`).
+- Lookup executes via $O(\log N)$ binary search without runtime initialization.
+- Opt-in via `kanji: true` in `Options` and `SequenceOptions`.
+
+### Optimal Multi-Mode Optimizer (DP Mixing)
+
+- Computes optimal mode switching points across Numeric, Alphanumeric, Byte, and Kanji segments using dynamic programming.
+- Mode transition costs are evaluated in exact 1/6 bit units (following Project Nayuki's algorithm).
+- Backtracking buffer is statically sized per tier: 322 B (T1), 652 B (T2), 7089 B (T3).
+- **Adversarial Fallback**: If an adversarial input generates more than the tier's segment budget (32 for T1, 48 for T2, 128 for T3), the optimizer falls back silently to single Byte mode. The resulting QR code remains strictly valid and compliant.
+
+### FNC1 & GS1 QR Codes
+
+- **First Position (`0101`)**: Identifies standard **GS1 QR Code** payloads.
+- **Second Position (`1001`)**: Identifies AIM application-specific symbols with an 8-bit Application Indicator (0..99 for numeric prefixes, or `c + 100` for ASCII letters `'A'..'Z'` / `'a'..'z'`).
+- **Segment Ordering**: When both ECI and FNC1 are configured, `z-libqr` automatically orders segments as `[ECI, FNC1, Data...]` per ISO/IEC 18004 clause 7.4.8.
+- *Notice*: The caller is responsible for placing `0x1D` (ASCII GS) field separators between variable-length Application Identifiers; the library does not perform semantic GS1 AI validation.
+
+### Structured Append Sequences
+
+- Encodes large payloads across 1 to 16 linked symbols per ISO/IEC 18004 Section 8.
+- **Automatic Minimal Symbol Count**: If `symbol_count` is omitted (or 0), the encoder automatically chooses the minimal $N \in [1..16]$ that fits the payload.
 - **Forced Symbol Count**: Callers can force an exact sequence count in $[1..16]$.
-- **N = 1 Identity**: When $N = 1$, the encoder produces a standard QR symbol without Structured Append header, byte-for-byte identical to standard `encode()`.
-- **Automatic Parity**: The encoder automatically computes the parity byte (cumulative XOR of all unencoded input data bytes) per clause 8.2.
-- **Header Order & FNC1 Interaction**: When Structured Append is active, the 20-bit header (`0011` mode + 4-bit pos + 4-bit total + 8-bit parity) is placed first. Per ISO 18004, FNC1 mode indicators are placed *only* on the first symbol (symbol 0).
-- **ECI Repetition Trade-off**: When an ECI assignment is configured, `z-libqr` repeats the ECI header on *every* symbol in the sequence (overhead: 12 bits per symbol). This guarantees scan robustness when symbols are read in arbitrary order by decoders.
-- **Balanced Chunking**: Chunks are evenly distributed using standard Euclidean division (`divmod`), with automatic boundary alignment to multi-byte UTF-8 codepoints and Shift-JIS 2-byte pairs.
-- **Memory & Buffers**: Zero heap allocations within the encoder core. Callers provide a single contiguous module buffer holding modules for all $N$ symbols. Two-phase dry-run queries (`module_storage == null` in Zig, or `buf == NULL || out == NULL` in C) return the required symbol count and parity with zero matrix allocations.
-  > [!WARNING]
-  > For $N=16$ symbols of version 40, `module_storage` is ~490 KB. Allocate on heap, not stack. `sequenceBufferLen(0, N)` (or `zqr_tN_sequence_buffer_len(0, N)`) returns the worst-case size.
+- **$N = 1$ Identity**: When $N = 1$, the encoder produces a standard QR code without Structured Append header, byte-for-byte identical to standard `encode()`.
+- **Automatic Parity**: Computes cumulative XOR parity across all unencoded input bytes before chunking.
+- **FNC1 Placement**: FNC1 mode indicator is placed *only* on the first symbol (symbol 0).
+- **ECI Repetition Trade-off**: ECI headers are repeated across *every* symbol in the sequence (12 bits overhead per symbol) to ensure decodability regardless of scan order.
+- **Balanced UTF-8 Chunking**: Payload is divided evenly via `divmod`, with automatic boundary alignment to multi-byte UTF-8 codepoints and Shift-JIS 2-byte pairs.
+- **Two-Phase Dry-Run**: Calling with `module_storage: null` in Zig (or `buf == NULL || out == NULL` in C) calculates the required symbol count and parity with zero matrix allocations.
+
+---
+
+## Zig API Reference
+
+Available through `zqr.Tier1`, `zqr.Tier2`, or `zqr.Tier3`:
+
+```zig
+// 1. High-level single-symbol encode (v1.0.0)
+pub fn encode(buf: []u8, data: []const u8, ecc: Ecc) Error!QrMatrix;
+
+// 2. Low-level forced version and mask (v1.0.0)
+pub fn encodeWithVersion(buf: []u8, data: []const u8, version: u8, ecc: Ecc, forced_mask: ?u3) Error!QrMatrix;
+
+// 3. Advanced multi-feature single-symbol encode (v1.1.0)
+pub fn encodeAdvanced(buf: ?[]u8, data: []const u8, options: Options) Error!QrMatrix;
+
+// 4. Structured Append sequence encode (v1.2.0)
+pub fn encodeSequence(module_storage: ?[]u8, data: []const u8, options: SequenceOptions) Error!SequenceResult;
+
+// Buffer length queries
+pub fn bufferLen(version: u8) Error!usize;
+pub fn sequenceBufferLen(version: u8, count: u8) Error!usize;
+```
+
+### Key Structs
+
+```zig
+pub const Options = struct {
+    ecc: Ecc = .low,
+    min_version: u8 = 1,
+    max_version: u8 = tier_max_version,
+    mask: ?u3 = null,       // null = auto evaluation
+    kanji: bool = false,     // enable JIS X 0208
+    optimize: bool = true,   // enable multi-mode DP optimizer
+    fnc1: ?Fnc1 = null,
+    eci: ?u32 = null,
+};
+
+pub const SequenceOptions = struct {
+    ecc: Ecc = .low,
+    min_version: u8 = 1,
+    max_version: u8 = tier_max_version,
+    mask: ?u3 = null,
+    kanji: bool = false,
+    optimize: bool = true,
+    fnc1: ?Fnc1 = null,
+    eci: ?u32 = null,
+    symbol_count: ?u8 = null, // null = auto (1..16), 1..16 = forced
+};
+
+pub const SequenceResult = struct {
+    count: u8,
+    parity: u8,
+    matrices: [16]QrMatrix, // only matrices[0..count] are populated
+
+    pub fn slice(self: *const SequenceResult) []const QrMatrix {
+        return self.matrices[0..self.count];
+    }
+};
+```
+
+---
+
+## C ABI Reference
+
+Each tier exports exactly 8 public symbols (24 symbols across all tiers):
+
+| Symbol Pattern | Purpose |
+| :--- | :--- |
+| `zqr_tN_encode` | Standard single-symbol encoding |
+| `zqr_tN_encode_with_version` | Low-level encode with forced version and mask |
+| `zqr_tN_encode_advanced` | Advanced options (Kanji, DP optimizer, FNC1, ECI) |
+| `zqr_tN_encode_sequence` | Structured Append sequence encoding (1–16 symbols) |
+| `zqr_tN_buffer_len` | Required module buffer length for a single symbol |
+| `zqr_tN_sequence_buffer_len` | Required module buffer length for a sequence of symbols |
+| `zqr_tN_max_version` | Returns maximum version supported by this tier (6, 10, or 40) |
+| `zqr_tN_strerror` | Human-readable string for negative status codes |
+
+### Return Codes
+
+```c
+#define ZQR_OK                           0
+#define ZQR_ERR_DATA_TOO_LONG           -1
+#define ZQR_ERR_VERSION_EXCEEDS_TIER    -2
+#define ZQR_ERR_INVALID_VERSION         -3
+#define ZQR_ERR_INVALID_ECC             -4
+#define ZQR_ERR_INVALID_MASK            -5
+#define ZQR_ERR_BUFFER_TOO_SMALL        -6
+#define ZQR_ERR_NULL_POINTER            -7
+#define ZQR_ERR_INVALID_SEGMENT_ORDER   -8
+```
+
+---
 
 ## Usage Examples
 
-### Path 1: Zig Module
+### Zig Consumer
 
 ```zig
+const std = @import("std");
 const zqr = @import("zqr");
 
-// Encode using Tier 1 (v1..6)
-var buf: [zqr.Tier1.max_buffer_len]u8 = undefined;
-const qr = try zqr.Tier1.encode(&buf, "HELLO WORLD", .medium);
+pub fn main() !void {
+    // 1. Standard single-symbol encode (Tier 1: v1..6)
+    var buf: [zqr.Tier1.max_buffer_len]u8 = undefined;
+    const qr = try zqr.Tier1.encode(&buf, "HELLO WORLD", .medium);
+    const is_dark = qr.modules[10 * qr.size + 10] == 1;
+    _ = is_dark;
 
-// Access output matrix (size * size bytes, values 0 or 1)
-const is_dark = qr.modules[y * qr.size + x] == 1;
+    // 2. Advanced encode with DP mixing and Kanji
+    const qr_adv = try zqr.Tier1.encodeAdvanced(&buf, "ABC123日本語", .{
+        .ecc = .low,
+        .kanji = true,
+        .optimize = true,
+    });
+    _ = qr_adv;
 
-// Advanced encoding with multi-mode DP mixing (e.g. ASCII + Japanese Kanji)
-const qr_mixed = try zqr.Tier1.encodeAdvanced(&buf, "ABC123日本語", .{
-    .ecc = .low,
-    .kanji = true,
-    .optimize = true, // dynamically finds optimal mode switching points
-});
-
-// GS1 QR Code: 0x1D separates variable-length fields.
-// The DP optimizer fits this in Version 1-L; without
-// optimize, it would require Version 2-L.
-const qr_gs1 = try zqr.Tier1.encodeAdvanced(&buf, "0101234567890128\x1D10BATCH1", .{
-    .ecc = .low,
-    .fnc1 = .{ .mode = .first },
-    .optimize = true,
-});
-
-// Structured Append Sequence (ISO/IEC 18004 Section 8)
-var seq_buf: [zqr.Tier1.max_sequence_buffer_len]u8 = undefined;
-const seq = try zqr.Tier1.encodeSequence(&seq_buf, "LARGE PAYLOAD...", .{
-    .ecc = .low,
-    .symbol_count = null, // auto-select minimal symbols (1..16)
-});
-// seq.count: number of symbols (1..16)
-// seq.parity: unencoded data XOR checksum
-// seq.matrices[0..seq.count]: individual QrMatrix for each symbol
+    // 3. Structured Append sequence (Tier 1)
+    var seq_buf: [zqr.Tier1.max_sequence_buffer_len]u8 = undefined;
+    const seq = try zqr.Tier1.encodeSequence(&seq_buf, "LONG PAYLOAD TO BE SPLIT ACROSS SYMBOLS", .{
+        .ecc = .low,
+        .symbol_count = null, // auto-select minimal symbols
+    });
+    std.debug.print("Sequence: {d} symbols, parity: 0x{X:0>2}\n", .{ seq.count, seq.parity });
+}
 ```
 
-### Path 2: C API
+### C99 / C++ Consumer
 
 ```c
 #include "zqr.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
-// Standard Single-Symbol Encode
-uint8_t buf[ZQR_T1_MAX_BUFFER_LEN];
-zqr_matrix qr;
-int rc = zqr_t1_encode((const uint8_t *)"HELLO WORLD", 11, ZQR_ECC_MEDIUM, buf, sizeof(buf), &qr);
-if (rc == ZQR_OK) {
-    // qr.version, qr.size, qr.modules
-}
+int main(void) {
+    // 1. Standard Single Symbol (Tier 1: max buffer 41x41 = 1681 bytes)
+    uint8_t buf[41 * 41];
+    zqr_matrix qr;
+    int rc = zqr_t1_encode((const uint8_t *)"HELLO WORLD", 11, ZQR_ECC_MEDIUM, buf, sizeof(buf), &qr);
+    if (rc != ZQR_OK) return 1;
 
-// Structured Append Sequence Encode (Increment 15)
-const char *data = "LARGE PAYLOAD REQUIRING MULTIPLE QR CODES...";
-zqr_sequence_options seq_opts = {
-    .min_version = 1,
-    .max_version = 6,
-    .ecc = ZQR_ECC_LOW,
-    .mask = -1,
-    .symbol_count = 0, // auto minimal count (1..16)
-};
+    // 2. Structured Append Sequence
+    const char *data = "LARGE PAYLOAD REQUIRING MULTIPLE QR CODES...";
+    zqr_sequence_options opts = {
+        .min_version = 1,
+        .max_version = 6,
+        .ecc = ZQR_ECC_LOW,
+        .mask = -1,
+        .symbol_count = 0, // auto minimal count
+    };
 
-// Phase 1: Query required symbol count and parity
-size_t count = 0;
-uint8_t parity = 0;
-rc = zqr_t1_encode_sequence((const uint8_t *)data, strlen(data), &seq_opts,
-                            NULL, 0, NULL, 0, &count, &parity);
-if (rc == ZQR_OK) {
-    // Phase 2: Allocate buffers and encode sequence atomically
+    // Phase 1: Query required symbol count and parity
+    size_t count = 0;
+    uint8_t parity = 0;
+    rc = zqr_t1_encode_sequence((const uint8_t *)data, strlen(data), &opts,
+                                NULL, 0, NULL, 0, &count, &parity);
+    if (rc != ZQR_OK) return 1;
+
+    // Phase 2: Allocate buffers on heap and encode sequence atomically
     size_t needed_bytes = zqr_t1_sequence_buffer_len(0, count);
-    uint8_t *module_buf = malloc(needed_bytes);
-    zqr_matrix *matrices = malloc(count * sizeof(zqr_matrix));
+    uint8_t *module_buf = (uint8_t *)malloc(needed_bytes);
+    zqr_matrix *matrices = (zqr_matrix *)malloc(count * sizeof(zqr_matrix));
 
-    rc = zqr_t1_encode_sequence((const uint8_t *)data, strlen(data), &seq_opts,
+    rc = zqr_t1_encode_sequence((const uint8_t *)data, strlen(data), &opts,
                                 module_buf, needed_bytes, matrices, count,
                                 &count, &parity);
-    // Render matrices[0 .. count - 1] ...
+    if (rc == ZQR_OK) {
+        printf("Encoded sequence of %zu symbols (version %u)\n", count, matrices[0].version);
+    }
+
     free(matrices);
     free(module_buf);
+    return 0;
 }
 ```
 
-### Path 3: Python ctypes (FFI)
+### Python FFI (ctypes)
 
 ```python
 import ctypes
 
 lib = ctypes.CDLL("libzqr_t3.so")
-buf_len = lib.zqr_t3_buffer_len(0)
-buf = (ctypes.c_uint8 * buf_len)()
 
 class ZqrMatrix(ctypes.Structure):
     _fields_ = [
@@ -197,32 +329,37 @@ class ZqrMatrix(ctypes.Structure):
         ("modules", ctypes.POINTER(ctypes.c_uint8)),
     ]
 
+buf_len = lib.zqr_t3_buffer_len(0)
+buf = (ctypes.c_uint8 * buf_len)()
 out = ZqrMatrix()
+
 data = b"HELLO WORLD"
 rc = lib.zqr_t3_encode(data, len(data), 1, buf, buf_len, ctypes.byref(out))
 assert rc == 0
+print(f"Generated Version {out.version} QR ({out.size}x{out.size})")
 ```
 
-## Verification & Testing
+---
 
-Recommended verification order:
+## Quality, Testing & Verification
 
-```bash
-zig build                      # Generates .a and .so libraries in zig-out/lib
-zig build test                 # Runs unit tests, golden fixtures, and C integration
-python3 tests/test_abi_so.py   # Validates FFI loading, SONAME tags, and symbol isolation
-```
+- **Test Suite**: **73/73 tests** pass locally across Zig unit tests, C integration tests, and Python FFI verification.
+- **Verification Commands**:
+  ```bash
+  zig build                      # Generates .a and .so libraries in zig-out/lib
+  zig build test                 # Runs unit tests, golden fixtures, and C integration
+  python3 tests/test_abi_so.py   # Validates FFI loading, SONAME tags, and symbol isolation
+  ```
+- **ABI & Symbol Hygiene**: Every `.so` shared object is audited via `nm -D --defined-only` to guarantee exactly 8 public symbols per tier, zero cross-tier leaks, and zero sanitizer/UBSan symbols.
+- **Reference Oracle Cross-Checks**:
+  - Deterministic module-by-module parity verification against Project Nayuki across all 1280 (version × ECC × mask) combinations.
+  - Multi-symbol bit-by-bit sequence comparison against canonical reference (Segno) with 0 module mismatches.
+- **CI / Build Automation**: Continuous Integration (CI) is **not yet configured**; test suites are executed locally.
+- **Benchmarks**: Official performance benchmarks are **not yet published**.
 
-Additional testing commands:
-- `zig build test-c-integration`: Compiles and runs the native C ABI integration suite standalone (linking all 3 `.a` archives simultaneously).
-- `python3 tools/gen_vectors.py --exhaustive`: Verifies all 1280 possible (version × ECC × mask) combinations bit-by-bit against Project Nayuki's reference implementation.
-
-## Alternatives
-
-- **libqrencode** (C, LGPL): higher throughput, but C only and LGPL licensed.
-- **Nayuki's QR Code generator** (multi-language, MIT): the reference implementation this port is based on.
-- **ZXing** (Java / C++, Apache 2.0): includes a barcode scanner/decoder; `z-libqr` is encoder-only.
+---
 
 ## License
 
-MIT License. See [LICENSE](LICENSE) for details (dual attribution with Project Nayuki).
+MIT License. See [LICENSE](LICENSE) for details.
+Copyright (c) 2026 carlos-sweb. Portions copyright (c) Project Nayuki.

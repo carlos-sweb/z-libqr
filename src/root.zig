@@ -68,3 +68,26 @@ test {
     _ = mask;
     _ = encoder;
 }
+
+test "README consumer example compiles and runs" {
+    const zqr = @This();
+    var buf: [zqr.Tier1.max_buffer_len]u8 = undefined;
+    const qr = try zqr.Tier1.encode(&buf, "HELLO WORLD", .medium);
+    const is_dark = qr.modules[10 * qr.size + 10] == 1;
+    _ = is_dark;
+
+    const qr_adv = try zqr.Tier1.encodeAdvanced(&buf, "ABC123日本語", .{
+        .ecc = .low,
+        .kanji = true,
+        .optimize = true,
+    });
+    _ = qr_adv;
+
+    var seq_buf: [zqr.Tier1.max_sequence_buffer_len]u8 = undefined;
+    const seq = try zqr.Tier1.encodeSequence(&seq_buf, "LONG PAYLOAD TO BE SPLIT ACROSS SYMBOLS", .{
+        .ecc = .low,
+        .symbol_count = null,
+    });
+    try @import("std").testing.expect(seq.count >= 1);
+    try @import("std").testing.expect(seq.parity != 0);
+}
