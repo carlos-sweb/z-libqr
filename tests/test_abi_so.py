@@ -14,9 +14,12 @@ import sys
 import subprocess
 import ctypes
 
-# Add tools directory for Nayuki oracle
+# Add tools directory for Nayuki oracle and local segno package
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+sys.path.insert(0, "/home/sweb/.gemini/antigravity-cli/brain/c3d125df-aac2-4820-846d-82cc562a7c29/scratch/py_pkg")
 from nayuki_qrcodegen import QrCode, QrSegment
+import segno
+import segno.encoder
 
 
 class ZqrMatrix(ctypes.Structure):
@@ -47,6 +50,23 @@ class ZqrOptions(ctypes.Structure):
     ]
 
 
+class ZqrSequenceOptions(ctypes.Structure):
+    _fields_ = [
+        ("min_version", ctypes.c_int),
+        ("max_version", ctypes.c_int),
+        ("ecc", ctypes.c_int),
+        ("mask", ctypes.c_int),
+        ("kanji", ctypes.c_int),
+        ("optimize", ctypes.c_int),
+        ("fnc1", ctypes.c_int),
+        ("fnc1_app_indicator", ctypes.c_uint8),
+        ("reserved", ctypes.c_uint8 * 3),
+        ("has_eci", ctypes.c_int),
+        ("eci", ctypes.c_uint32),
+        ("symbol_count", ctypes.c_int),
+    ]
+
+
 def verify_soname(so_path, expected_soname):
     env = os.environ.copy()
     env["LC_ALL"] = "C"
@@ -66,12 +86,14 @@ def verify_exported_symbols(so_path, tier_prefix):
             sym = parts[2]
             exported.append(sym)
 
-    # Shipped symbols must strictly match the 6 public symbols for this tier
+    # Shipped symbols must strictly match the 8 public symbols for this tier
     expected_symbols = {
         f"{tier_prefix}_encode",
         f"{tier_prefix}_encode_with_version",
         f"{tier_prefix}_encode_advanced",
+        f"{tier_prefix}_encode_sequence",
         f"{tier_prefix}_buffer_len",
+        f"{tier_prefix}_sequence_buffer_len",
         f"{tier_prefix}_max_version",
         f"{tier_prefix}_strerror",
     }
@@ -91,7 +113,7 @@ def verify_exported_symbols(so_path, tier_prefix):
     for s in exported:
         assert not s.startswith("__ubsan"), f"Sanitizer leak: found {s} in {so_path}"
 
-    print(f"  [OK] Symbol isolation verified for {so_path}: exactly 6 symbols, 0 leaks")
+    print(f"  [OK] Symbol isolation verified for {so_path}: exactly 8 symbols, 0 leaks")
 
 
 def test_tier_functional(so_path, tier_num, max_v):
@@ -229,6 +251,157 @@ def test_tier_functional(so_path, tier_num, max_v):
             mod_actual = out.modules[y * out.size + x]
             mod_expected = 1 if nayuki_qr.get_module(x, y) else 0
             assert mod_actual == mod_expected, f"GS1 mismatch at ({x}, {y})"
+
+    # --- Structured Append Verification (Increment 15) ---
+    fn_seq_buf_len = getattr(lib, f"{prefix}_sequence_buffer_len")
+    fn_seq_buf_len.restype = ctypes.c_size_t
+    assert fn_seq_buf_len(0, 0) == 16 * expected_max_buf
+    assert fn_seq_buf_len(1, 3) == 3 * (21 * 21)
+    assert fn_seq_buf_len(max_v + 1, 1) == 0
+    assert fn_seq_buf_len(1, 17) == 0
+
+    fn_encode_seq = getattr(lib, f"{prefix}_encode_sequence")
+    fn_encode_seq.argtypes = [
+        ctypes.POINTER(ctypes.c_uint8),
+        ctypes.c_size_t,
+        ctypes.POINTER(ZqrSequenceOptions),
+        ctypes.POINTER(ctypes.c_uint8),
+        ctypes.c_size_t,
+        ctypes.POINTER(ZqrMatrix),
+        ctypes.c_size_t,
+        ctypes.POINTER(ctypes.c_size_t),
+        ctypes.POINTER(ctypes.c_uint8),
+    ]
+    fn_encode_seq.restype = ctypes.c_int
+
+    sa_text = b"hello world 123 foo! structured append test bar! final piece xyz."
+    sa_arr = (ctypes.c_uint8 * len(sa_text)).from_buffer_copy(sa_text)
+    seq_opts = ZqrSequenceOptions(
+        min_version=2,
+        max_version=max_v,
+        ecc=0, # LOW
+        mask=0,
+        kanji=0,
+        optimize=0, # single mode to align with standard byte encoder
+        fnc1=0,
+        fnc1_app_indicator=0,
+        reserved=(ctypes.c_uint8 * 3)(),
+        has_eci=0,
+        eci=0,
+        symbol_count=3,
+    )
+
+    # 1. Dry-run query: NULL buffer returns required count and parity without writing
+    out_count_query = ctypes.c_size_t(0)
+    out_parity_query = ctypes.c_uint8(0)
+    rc_query = fn_encode_seq(
+        sa_arr, len(sa_text), ctypes.byref(seq_opts),
+        None, 0, None, 0,
+        ctypes.byref(out_count_query), ctypes.byref(out_parity_query)
+    )
+    assert rc_query == 0, f"Dry-run query failed: {rc_query}"
+    assert out_count_query.value == 3
+    expected_parity = segno.encoder.calc_structured_append_parity(sa_text.decode("latin1"))
+    assert out_parity_query.value == expected_parity, f"Parity mismatch: {out_parity_query.value} vs {expected_parity}"
+
+    # 2. Buffer too small failure semantics: atomic all-or-nothing
+    seq_buf_needed = 3 * expected_max_buf
+    seq_buf = (ctypes.c_uint8 * seq_buf_needed)()
+    small_matrices = (ZqrMatrix * 2)() # capacity 2 < 3
+    rc_small = fn_encode_seq(
+        sa_arr, len(sa_text), ctypes.byref(seq_opts),
+        seq_buf, seq_buf_needed, small_matrices, 2,
+        ctypes.byref(out_count_query), None
+    )
+    assert rc_small == -6, f"Expected ZQR_ERR_BUFFER_TOO_SMALL (-6), got {rc_small}"
+    assert out_count_query.value == 3
+
+    # 3. Test A: Deterministic module-for-module comparison against segno canonical reference
+    seq_matrices = (ZqrMatrix * 3)()
+    rc_full = fn_encode_seq(
+        sa_arr, len(sa_text), ctypes.byref(seq_opts),
+        seq_buf, seq_buf_needed, seq_matrices, 3,
+        ctypes.byref(out_count_query), ctypes.byref(out_parity_query)
+    )
+    assert rc_full == 0, f"Full sequence encode failed: {rc_full}"
+    assert out_count_query.value == 3
+
+    segno_seq = segno.make_sequence(sa_text.decode("latin1"), symbol_count=3, error="l", mask=0, boost_error=False)
+    assert len(segno_seq) == 3
+
+    for s_idx in range(3):
+        s_segno = segno_seq[s_idx]
+        m_zig = seq_matrices[s_idx]
+        assert m_zig.version == s_segno.version, f"Version mismatch at symbol {s_idx}"
+        assert m_zig.size == len(s_segno.matrix), f"Size mismatch at symbol {s_idx}"
+        for y in range(m_zig.size):
+            for x in range(m_zig.size):
+                zig_m = m_zig.modules[y * m_zig.size + x]
+                segno_m = s_segno.matrix[y][x]
+                assert zig_m == segno_m, f"Symbol {s_idx} module mismatch at ({x}, {y}): zig={zig_m}, segno={segno_m}"
+
+    # 4. Test B: Dynamic parity and count verification across multiple payloads
+    dynamic_payloads = [
+        b"A",
+        b"0123456789",
+        b"Structured Append parity test with multiple symbols 1234567890 ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+    ]
+    for dyn in dynamic_payloads:
+        dyn_arr = (ctypes.c_uint8 * len(dyn)).from_buffer_copy(dyn)
+        dyn_opts = ZqrSequenceOptions(
+            min_version=1,
+            max_version=max_v,
+            ecc=0,
+            mask=0,
+            kanji=0,
+            optimize=1,
+            fnc1=0,
+            fnc1_app_indicator=0,
+            reserved=(ctypes.c_uint8 * 3)(),
+            has_eci=0,
+            eci=0,
+            symbol_count=0, # auto
+        )
+        p_val = ctypes.c_uint8(0)
+        c_val = ctypes.c_size_t(0)
+        rc_dyn = fn_encode_seq(
+            dyn_arr, len(dyn), ctypes.byref(dyn_opts),
+            None, 0, None, 0,
+            ctypes.byref(c_val), ctypes.byref(p_val)
+        )
+        assert rc_dyn == 0
+        expected_p = segno.encoder.calc_structured_append_parity(dyn.decode("latin1"))
+        assert p_val.value == expected_p, f"Dynamic parity mismatch for payload {dyn}: got {p_val.value}, expected {expected_p}"
+
+    # 5. Extreme Structured Append test: N=16 symbols in Tier 3
+    if tier_num == 3:
+        ext_text = b"EXTREME-N16-TEST-" * 60  # 1020 bytes
+        ext_arr = (ctypes.c_uint8 * len(ext_text)).from_buffer_copy(ext_text)
+        ext_opts = ZqrSequenceOptions(
+            min_version=1,
+            max_version=40,
+            ecc=3,  # HIGH
+            mask=0,
+            kanji=0,
+            optimize=0,
+            fnc1=0,
+            fnc1_app_indicator=0,
+            reserved=(ctypes.c_uint8 * 3)(),
+            has_eci=0,
+            eci=0,
+            symbol_count=16,
+        )
+        ext_c = ctypes.c_size_t(0)
+        ext_p = ctypes.c_uint8(0)
+        rc_ext = fn_encode_seq(
+            ext_arr, len(ext_text), ctypes.byref(ext_opts),
+            None, 0, None, 0,
+            ctypes.byref(ext_c), ctypes.byref(ext_p),
+        )
+        assert rc_ext == 0, f"N=16 dry-run failed with code {rc_ext}"
+        assert ext_c.value == 16, f"Expected count 16, got {ext_c.value}"
+        expected_ext_p = segno.encoder.calc_structured_append_parity(ext_text.decode("latin1"))
+        assert ext_p.value == expected_ext_p, f"Parity mismatch for N=16: {ext_p.value} vs {expected_ext_p}"
 
     print(f"  [OK] Functional verification passed for {so_path}")
 

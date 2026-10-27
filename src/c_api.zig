@@ -36,6 +36,22 @@ pub const Options = extern struct {
     eci: u32,
 };
 
+/// Mirror of `zqr_sequence_options` in include/zqr.h.
+pub const SequenceOptions = extern struct {
+    min_version: c_int,
+    max_version: c_int,
+    ecc: c_int,
+    mask: c_int,
+    kanji: c_int,
+    optimize: c_int,
+    fnc1: c_int,
+    fnc1_app_indicator: u8,
+    reserved: [3]u8,
+    has_eci: c_int,
+    eci: u32,
+    symbol_count: c_int,
+};
+
 comptime {
     // Layout is part of the ABI: 8 bytes of header, then the pointer.
     std.debug.assert(@offsetOf(Matrix, "modules") == 8);
@@ -215,6 +231,94 @@ pub fn cWrapper(comptime max_version: u8, comptime prefix: []const u8) type {
             return Status.ok.code();
         }
 
+        pub fn sequenceBufferLen(version: c_int, count: c_int) callconv(.c) usize {
+            const v: u8 = if (version <= 0) max_version else blk: {
+                if (version < 1 or version > 40 or version > max_version) return 0;
+                break :blk @intCast(version);
+            };
+            const c: u8 = if (count <= 0) 16 else blk: {
+                if (count < 1 or count > 16) return 0;
+                break :blk @intCast(count);
+            };
+            return E.sequenceBufferLen(v, c) catch 0;
+        }
+
+        pub fn encodeSequence(
+            data: ?[*]const u8,
+            data_len: usize,
+            opts: ?*const SequenceOptions,
+            buf: ?[*]u8,
+            buf_len: usize,
+            out: ?[*]Matrix,
+            out_capacity: usize,
+            out_count: ?*usize,
+            out_parity: ?*u8,
+        ) callconv(.c) c_int {
+            const bytes = constSlice(data, data_len) orelse return Status.null_pointer.code();
+            const o = opts orelse return Status.null_pointer.code();
+
+            const level = parseEcc(o.ecc) orelse return Status.invalid_ecc.code();
+            const mask_val = parseMask(o.mask) catch return Status.invalid_mask.code();
+
+            const min_v: u8 = if (o.min_version <= 0) zqr.min_version else blk: {
+                if (o.min_version < zqr.min_version or o.min_version > zqr.max_version)
+                    return Status.invalid_version.code();
+                break :blk @intCast(o.min_version);
+            };
+
+            const max_v: u8 = if (o.max_version <= 0) max_version else blk: {
+                if (o.max_version < zqr.min_version or o.max_version > zqr.max_version)
+                    return Status.invalid_version.code();
+                if (o.max_version > max_version)
+                    return Status.version_exceeds_tier.code();
+                break :blk @intCast(o.max_version);
+            };
+
+            const fnc1_opt: ?zqr.Fnc1 = switch (o.fnc1) {
+                1 => .{ .mode = .first },
+                2 => .{ .mode = .second, .app_indicator = o.fnc1_app_indicator },
+                else => null,
+            };
+            const eci_opt: ?u32 = if (o.has_eci != 0) o.eci else null;
+
+            const sym_count_opt: ?u8 = if (o.symbol_count <= 0) null else blk: {
+                if (o.symbol_count < 1 or o.symbol_count > 16) return Status.invalid_version.code();
+                break :blk @intCast(o.symbol_count);
+            };
+
+            // Two-phase dry-run: if buf == null or out == null, compute sequence size only
+            const is_dry_run = (buf == null or out == null);
+            const target_storage: ?[]u8 = if (is_dry_run) null else buf.?[0..buf_len];
+
+            const seq_res = E.encodeSequence(target_storage, bytes, .{
+                .ecc = level,
+                .min_version = min_v,
+                .max_version = max_v,
+                .mask = mask_val,
+                .kanji = o.kanji != 0,
+                .optimize = o.optimize != 0,
+                .fnc1 = fnc1_opt,
+                .eci = eci_opt,
+                .symbol_count = sym_count_opt,
+            }) catch |err| return Status.fromError(err).code();
+
+            if (out_count) |oc| oc.* = seq_res.count;
+            if (out_parity) |op| op.* = seq_res.parity;
+
+            if (is_dry_run) return Status.ok.code();
+
+            if (out_capacity < seq_res.count) {
+                return Status.buffer_too_small.code();
+            }
+
+            const out_slice = out.?[0..out_capacity];
+            for (0..seq_res.count) |i| {
+                writeOut(&out_slice[i], seq_res.matrices[i]);
+            }
+
+            return Status.ok.code();
+        }
+
         /// Required buffer length for `version`; 0 means "largest version of
         /// this tier". Returns 0 if `version` is invalid or above the tier.
         pub fn bufferLen(version: c_int) callconv(.c) usize {
@@ -239,7 +343,9 @@ pub fn cWrapper(comptime max_version: u8, comptime prefix: []const u8) type {
             @export(&encode, .{ .name = prefix ++ "_encode" });
             @export(&encodeWithVersion, .{ .name = prefix ++ "_encode_with_version" });
             @export(&encodeAdvanced, .{ .name = prefix ++ "_encode_advanced" });
+            @export(&encodeSequence, .{ .name = prefix ++ "_encode_sequence" });
             @export(&bufferLen, .{ .name = prefix ++ "_buffer_len" });
+            @export(&sequenceBufferLen, .{ .name = prefix ++ "_sequence_buffer_len" });
             @export(&maxVersion, .{ .name = prefix ++ "_max_version" });
             @export(&strerror, .{ .name = prefix ++ "_strerror" });
         }

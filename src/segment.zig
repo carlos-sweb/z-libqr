@@ -64,7 +64,7 @@ pub fn numCharCountBits(mode: Mode, version: u8) u8 {
             1 => 10,
             else => 12,
         },
-        .eci, .fnc1_first, .fnc1_second => 0,
+        .eci, .fnc1_first, .fnc1_second, .structured_append => 0,
     };
 }
 
@@ -101,6 +101,10 @@ pub fn calcSegmentBitLength(mode: Mode, num_chars: usize) usize {
         .fnc1_second => {
             if (num_chars != 0) return LENGTH_OVERFLOW;
             return 8; // Exactly 8 bits for Application Indicator
+        },
+        .structured_append => {
+            if (num_chars != 0) return LENGTH_OVERFLOW;
+            return 16; // 4 bits position + 4 bits total + 8 bits parity
         },
     }
     if (result > 32767) return LENGTH_OVERFLOW;
@@ -338,6 +342,29 @@ pub fn appIndicatorFromDigits(digits: *const [2]u8) error{InvalidApplicationIndi
         return error.InvalidApplicationIndicator;
     }
     return (digits[0] - '0') * 10 + (digits[1] - '0');
+}
+
+/// Calculates the Structured Append parity checksum per ISO/IEC 18004:2015 clause 8.2:
+/// cumulative XOR of all bytes in the original unencoded input data.
+pub fn computeParity(data: []const u8) u8 {
+    var parity: u8 = 0;
+    for (data) |b| parity ^= b;
+    return parity;
+}
+
+/// Creates a Structured Append header segment per ISO/IEC 18004:2015 clause 8.
+/// Mode indicator is 0011 (0x3). Character count is 0 bits.
+/// Payload is 16 bits: 4-bit position (0..15), 4-bit total (1..15), 8-bit parity.
+/// Total bits in QR symbol = 4 (mode) + 0 (ccbits) + 16 (payload) = 20 bits.
+pub fn makeStructuredAppend(position: u4, total: u4, parity: u8, buf: *[2]u8) Segment {
+    buf[0] = (@as(u8, position) << 4) | @as(u8, total);
+    buf[1] = parity;
+    return .{
+        .mode = .structured_append,
+        .num_chars = 0,
+        .bit_length = 16,
+        .data = buf[0..2],
+    };
 }
 
 /// Calculates the total number of bits required to encode the given slice of segments

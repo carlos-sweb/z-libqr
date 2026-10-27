@@ -20,6 +20,7 @@ pub const Ecc = types.Ecc;
 pub const Mode = types.Mode;
 pub const Fnc1Mode = types.Fnc1Mode;
 pub const Fnc1 = types.Fnc1;
+pub const StructuredAppend = types.StructuredAppend;
 pub const Error = types.Error;
 pub const QrMatrix = types.QrMatrix;
 
@@ -37,6 +38,8 @@ pub const makeKanji = segment.makeKanji;
 pub const makeEci = segment.makeEci;
 pub const makeFnc1First = segment.makeFnc1First;
 pub const makeFnc1Second = segment.makeFnc1Second;
+pub const makeStructuredAppend = segment.makeStructuredAppend;
+pub const computeParity = segment.computeParity;
 pub const appIndicatorFromChar = segment.appIndicatorFromChar;
 pub const appIndicatorFromDigits = segment.appIndicatorFromDigits;
 

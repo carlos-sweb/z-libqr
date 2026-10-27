@@ -22,6 +22,17 @@ pub const Mode = enum(u4) {
     eci = 0x7,
     fnc1_first = 0x5,
     fnc1_second = 0x9,
+    structured_append = 0x3,
+};
+
+/// Structured Append metadata defined in ISO/IEC 18004 clause 8.
+pub const StructuredAppend = struct {
+    /// 0-indexed sequence position of the symbol: 0..15 (representing symbol 1..16).
+    position: u4,
+    /// 0-indexed total symbol count in sequence: 1..15 (representing total 2..16 symbols).
+    total: u4,
+    /// 8-bit parity checksum (cumulative XOR of all unencoded input bytes).
+    parity: u8,
 };
 
 /// FNC1 operating mode defined in ISO/IEC 18004.

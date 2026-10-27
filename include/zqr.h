@@ -23,7 +23,7 @@ extern "C" {
 
 /* Library version */
 #define ZQR_VERSION_MAJOR 1
-#define ZQR_VERSION_MINOR 1
+#define ZQR_VERSION_MINOR 2
 #define ZQR_VERSION_PATCH 0
 
 /* Error correction levels (matches enum qrcodegen_Ecc in nayuki/QR-Code-generator) */
@@ -33,13 +33,14 @@ extern "C" {
 #define ZQR_ECC_HIGH     3
 
 /* Encoding modes (4-bit mode indicators) */
-#define ZQR_MODE_NUMERIC      0x1
-#define ZQR_MODE_ALPHANUMERIC 0x2
-#define ZQR_MODE_BYTE         0x4
-#define ZQR_MODE_KANJI        0x8
-#define ZQR_MODE_ECI          0x7
-#define ZQR_MODE_FNC1_FIRST   0x5
-#define ZQR_MODE_FNC1_SECOND  0x9
+#define ZQR_MODE_NUMERIC           0x1
+#define ZQR_MODE_ALPHANUMERIC      0x2
+#define ZQR_MODE_BYTE              0x4
+#define ZQR_MODE_KANJI             0x8
+#define ZQR_MODE_ECI               0x7
+#define ZQR_MODE_FNC1_FIRST        0x5
+#define ZQR_MODE_FNC1_SECOND       0x9
+#define ZQR_MODE_STRUCTURED_APPEND 0x3
 
 /* FNC1 Operating Modes (ISO/IEC 18004 clause 7.4.8) */
 #define ZQR_FNC1_NONE   0
@@ -90,6 +91,24 @@ typedef struct zqr_options {
     uint32_t eci;    /* ECI assignment value (0..999999) */
 } zqr_options;
 
+/*
+ * Structured Append sequence options (additive in Increment 15).
+ */
+typedef struct zqr_sequence_options {
+    int min_version; /* 0 = tables.min_version (1) */
+    int max_version; /* 0 = tier max_version */
+    int ecc;         /* ZQR_ECC_* */
+    int mask;        /* -1 = auto, 0..7 = forced */
+    int kanji;       /* 0 = off, 1 = enable pure Kanji mode */
+    int optimize;    /* 0 = single mode, 1 = optimal multi-mode DP */
+    int fnc1;        /* ZQR_FNC1_NONE, ZQR_FNC1_FIRST, ZQR_FNC1_SECOND */
+    uint8_t fnc1_app_indicator; /* Application Indicator (0..255) if fnc1 == ZQR_FNC1_SECOND */
+    uint8_t reserved[3];        /* Explicit ABI padding */
+    int has_eci;     /* 0 = no ECI, 1 = use eci field */
+    uint32_t eci;    /* ECI assignment value (0..999999) */
+    int symbol_count; /* 0 = auto (1..16), 1..16 = forced symbol count */
+} zqr_sequence_options;
+
 /* Macro to declare prototypes for a given tier prefix */
 #define ZQR_DECLARE_TIER_PROTOTYPES(prefix) \
     int prefix##_encode( \
@@ -102,7 +121,13 @@ typedef struct zqr_options {
     int prefix##_encode_advanced( \
         const uint8_t *data, size_t len, const zqr_options *opts, \
         uint8_t *buf, size_t buf_len, zqr_matrix *out); \
+    int prefix##_encode_sequence( \
+        const uint8_t *data, size_t len, const zqr_sequence_options *opts, \
+        uint8_t *buf, size_t buf_len, \
+        zqr_matrix *out, size_t out_capacity, \
+        size_t *out_count, uint8_t *out_parity); \
     size_t prefix##_buffer_len(int version /* 0 = max for tier */); \
+    size_t prefix##_sequence_buffer_len(int version /* 0 = max for tier */, int count /* 0 = 16 */); \
     int prefix##_max_version(void); \
     const char *prefix##_strerror(int code);
 

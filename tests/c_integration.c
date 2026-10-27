@@ -10,7 +10,7 @@ int main(void) {
 
     // 1. Verify Header Definitions
     assert(ZQR_VERSION_MAJOR == 1);
-    assert(ZQR_VERSION_MINOR == 1);
+    assert(ZQR_VERSION_MINOR == 2);
     assert(ZQR_VERSION_PATCH == 0);
     assert(ZQR_OK == 0);
     assert(ZQR_ERR_DATA_TOO_LONG == -1);
@@ -141,6 +141,43 @@ int main(void) {
     rc = zqr_t1_encode_advanced((const uint8_t *)app_data, strlen(app_data), &fnc1_2_opts, buf_t1, sizeof(buf_t1), &m1);
     assert(rc == ZQR_OK);
     assert(m1.version >= 1 && m1.version <= 6);
+
+    // 10. Structured Append Sequence via C ABI (Increment 15)
+    zqr_sequence_options seq_opts = {
+        .min_version = 1,
+        .max_version = 6,
+        .ecc = ZQR_ECC_LOW,
+        .mask = -1,
+        .kanji = 0,
+        .optimize = 1,
+        .fnc1 = ZQR_FNC1_NONE,
+        .symbol_count = 3,
+    };
+    const char *seq_data = "HELLO WORLD SEQUENCE SPLIT TEST ACROSS MULTIPLE QR CODES 12345";
+    size_t out_count = 0;
+    uint8_t out_parity = 0;
+
+    // Dry-run call with NULL buf and NULL out to query count and parity
+    rc = zqr_t1_encode_sequence((const uint8_t *)seq_data, strlen(seq_data), &seq_opts, NULL, 0, NULL, 0, &out_count, &out_parity);
+    assert(rc == ZQR_OK);
+    assert(out_count == 3);
+    assert(out_parity != 0);
+
+    // Buffer too small check on out_capacity
+    zqr_matrix seq_matrices[3];
+    uint8_t seq_storage[3 * 41 * 41];
+    rc = zqr_t1_encode_sequence((const uint8_t *)seq_data, strlen(seq_data), &seq_opts, seq_storage, sizeof(seq_storage), seq_matrices, 2, &out_count, &out_parity);
+    assert(rc == ZQR_ERR_BUFFER_TOO_SMALL);
+
+    // Full successful sequence encoding
+    rc = zqr_t1_encode_sequence((const uint8_t *)seq_data, strlen(seq_data), &seq_opts, seq_storage, sizeof(seq_storage), seq_matrices, 3, &out_count, &out_parity);
+    assert(rc == ZQR_OK);
+    assert(out_count == 3);
+    for (size_t i = 0; i < 3; i++) {
+        assert(seq_matrices[i].version >= 1 && seq_matrices[i].version <= 6);
+        assert(seq_matrices[i].size > 0);
+        assert(seq_matrices[i].modules != NULL);
+    }
 
     printf("All C ABI integration assertions passed successfully.\n");
     return 0;
