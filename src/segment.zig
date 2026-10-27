@@ -12,6 +12,9 @@ const std = @import("std");
 const types = @import("types.zig");
 const tables = @import("tables.zig");
 const BitBuffer = @import("BitBuffer.zig").BitBuffer;
+pub const kanji = @import("kanji.zig");
+pub const isKanji = kanji.isKanji;
+pub const toQrKanji = kanji.toQrKanji;
 
 pub const Mode = types.Mode;
 
@@ -61,7 +64,7 @@ pub fn numCharCountBits(mode: Mode, version: u8) u8 {
             1 => 10,
             else => 12,
         },
-        .eci => 0,
+        .eci, .fnc1_first, .fnc1_second => 0,
     };
 }
 
@@ -90,6 +93,14 @@ pub fn calcSegmentBitLength(mode: Mode, num_chars: usize) usize {
         .eci => {
             if (num_chars != 0) return LENGTH_OVERFLOW;
             result = 3 * 8; // Worst case buffer size calculation in Nayuki
+        },
+        .fnc1_first => {
+            if (num_chars != 0) return LENGTH_OVERFLOW;
+            return 0;
+        },
+        .fnc1_second => {
+            if (num_chars != 0) return LENGTH_OVERFLOW;
+            return 8; // Exactly 8 bits for Application Indicator
         },
     }
     if (result > 32767) return LENGTH_OVERFLOW;
@@ -217,6 +228,38 @@ pub fn makeAlphanumeric(text: []const u8, buf: []u8) Segment {
     };
 }
 
+/// Encodes a UTF-8 string consisting entirely of JIS X 0208 characters in Kanji mode.
+/// Requires `buf.len >= calcSegmentBufferSize(.kanji, num_chars)`.
+/// Returns error.InvalidUtf8 if `text` is not valid UTF-8.
+/// Returns error.InvalidCharacter if any character is not in JIS X 0208.
+/// Returns error.BufferTooSmall if `buf.len` is insufficient.
+/// Source: nayuki/QR-Code-generator, QrSegmentAdvanced.java, makeKanji.
+pub fn makeKanji(text: []const u8, buf: []u8) !Segment {
+    const num_chars = try kanji.countKanji(text);
+    const bit_len = num_chars * 13;
+    const byte_len = (bit_len + 7) / 8;
+    if (buf.len < byte_len) return error.BufferTooSmall;
+
+    if (byte_len > 0) {
+        @memset(buf[0..byte_len], 0);
+    }
+    var bb = BitBuffer.init(buf[0..byte_len]);
+
+    var iter = (std.unicode.Utf8View.init(text) catch return error.InvalidUtf8).iterator();
+    while (iter.nextCodepoint()) |cp| {
+        const qr_val = kanji.toQrKanji(cp) orelse return error.InvalidCharacter;
+        bb.appendBits(qr_val, 13);
+    }
+    std.debug.assert(bb.bit_length == bit_len);
+
+    return .{
+        .mode = .kanji,
+        .num_chars = num_chars,
+        .data = buf[0..byte_len],
+        .bit_length = bit_len,
+    };
+}
+
 /// Encodes an Extended Channel Interpretation (ECI) assignment value (0..999999).
 /// Precondition: `assign_val <= 999999` and `buf.len >= 3`.
 /// Source: nayuki/QR-Code-generator, c/qrcodegen.c, function qrcodegen_makeEci.
@@ -251,6 +294,50 @@ pub fn makeEci(assign_val: u32, buf: []u8) Segment {
         .data = buf[0..byte_len],
         .bit_length = byte_len * 8,
     };
+}
+
+/// Creates an FNC1 in First Position segment (GS1 QR Code).
+/// Mode indicator is 0101 (0x5). Character count is 0 bits. Payload length is 0 bits.
+/// Source: ISO/IEC 18004:2015, section 7.4.8.2.
+pub fn makeFnc1First() Segment {
+    return .{
+        .mode = .fnc1_first,
+        .num_chars = 0,
+        .bit_length = 0,
+        .data = &.{},
+    };
+}
+
+/// Creates an FNC1 in Second Position segment (AIM Application-Specific).
+/// Mode indicator is 1001 (0x9). Character count is 0 bits. Payload is 8 bits (Application Indicator).
+/// Source: ISO/IEC 18004:2015, section 7.4.8.3.
+pub fn makeFnc1Second(app_indicator: u8, buf: []u8) Segment {
+    std.debug.assert(buf.len >= 1);
+    buf[0] = app_indicator;
+    return .{
+        .mode = .fnc1_second,
+        .num_chars = 0,
+        .bit_length = 8,
+        .data = buf[0..1],
+    };
+}
+
+/// Converts a Latin alphabetic character ('a'..'z', 'A'..'Z') into an 8-bit Application Indicator
+/// per ISO/IEC 18004:2015 clause 7.4.8.3: value = ASCII value + 100.
+pub fn appIndicatorFromChar(c: u8) error{InvalidApplicationIndicator}!u8 {
+    return switch (c) {
+        'a'...'z', 'A'...'Z' => c + 100,
+        else => error.InvalidApplicationIndicator,
+    };
+}
+
+/// Converts a 2-digit ASCII string ("00".."99") into an 8-bit Application Indicator
+/// per ISO/IEC 18004:2015 clause 7.4.8.3: 2-digit number is encoded as 8-bit binary value (0..99).
+pub fn appIndicatorFromDigits(digits: *const [2]u8) error{InvalidApplicationIndicator}!u8 {
+    if (digits[0] < '0' or digits[0] > '9' or digits[1] < '0' or digits[1] > '9') {
+        return error.InvalidApplicationIndicator;
+    }
+    return (digits[0] - '0') * 10 + (digits[1] - '0');
 }
 
 /// Calculates the total number of bits required to encode the given slice of segments
@@ -408,6 +495,31 @@ test "makeAlphanumeric against reference cases" {
     try testing.expectEqualSlices(u8, &[_]u8{ 0x96, 0xCD, 0x80 }, seg3.data);
 }
 
+test "makeKanji with Madoka vector" {
+    const madoka = "\xE3\x80\x8C\xE9\xAD\x94\xE6\xB3\x95\xE5\xB0\x91\xE5\xA5\xB3\xE3\x81\xBE\xE3\x81\xA9\xE3\x81\x8B\xE2\x98\x86\xE3\x83\x9E\xE3\x82\xAE\xE3\x82\xAB\xE3\x80\x8D\xE3\x81\xA3\xE3\x81\xA6\xE3\x80\x81\xE3\x80\x80\xD0\x98\xD0\x90\xD0\x98\xE3\x80\x80\xEF\xBD\x84\xEF\xBD\x85\xEF\xBD\x93\xEF\xBD\x95\xE3\x80\x80\xCE\xBA\xCE\xB1\xEF\xBC\x9F";
+    var buf: [48]u8 = undefined;
+    const seg = try makeKanji(madoka, &buf);
+
+    try testing.expectEqual(Mode.kanji, seg.mode);
+    try testing.expectEqual(@as(usize, 29), seg.num_chars);
+    try testing.expectEqual(@as(usize, 377), seg.bit_length);
+
+    const expected_bytes = [_]u8{
+        0x01, 0xAC, 0x00, 0x9F, 0x80, 0xAE, 0xD5, 0x6B, 0x85, 0x70, 0x28, 0xE1,
+        0x29, 0x02, 0xC8, 0x6F, 0x43, 0x1A, 0x18, 0xA0, 0x1B, 0x05, 0x04, 0x28,
+        0x80, 0x01, 0x00, 0x00, 0x92, 0x44, 0x80, 0x24, 0x90, 0x00, 0x04, 0x10,
+        0x20, 0xA1, 0x13, 0x08, 0xA8, 0x00, 0x04, 0x10, 0x1F, 0xF0, 0x04, 0x00,
+    };
+    try testing.expectEqualSlices(u8, &expected_bytes, seg.data);
+
+    // Buffer too small test
+    var small_buf: [47]u8 = undefined;
+    try testing.expectError(error.BufferTooSmall, makeKanji(madoka, &small_buf));
+
+    // Invalid character test (mixed)
+    try testing.expectError(error.InvalidCharacter, makeKanji("まどかA", &buf));
+}
+
 // Ported from nayuki/QR-Code-generator, c/qrcodegen-test.c, function testMakeEci.
 test "makeEci against reference cases" {
     var buf: [3]u8 = undefined;
@@ -466,4 +578,42 @@ test "getTotalBits against reference cases" {
     try testing.expectEqual(LENGTH_OVERFLOW, getTotalBits(&overflow_seg, 1));
     // At v10, ccbits=16 so 300 chars fits:
     try testing.expect(getTotalBits(&overflow_seg, 10) != LENGTH_OVERFLOW);
+}
+
+test "FNC1 first and second position segment construction" {
+    // 1. FNC1 in first position
+    const seg_fnc1_1 = makeFnc1First();
+    try testing.expectEqual(Mode.fnc1_first, seg_fnc1_1.mode);
+    try testing.expectEqual(@as(usize, 0), seg_fnc1_1.num_chars);
+    try testing.expectEqual(@as(usize, 0), seg_fnc1_1.bit_length);
+    // Overhead = 4 (mode) + 0 (ccbits) + 0 (payload) = 4 bits
+    try testing.expectEqual(@as(usize, 4), getTotalBits(&[_]Segment{seg_fnc1_1}, 1));
+    try testing.expectEqual(@as(usize, 4), getTotalBits(&[_]Segment{seg_fnc1_1}, 20));
+    try testing.expectEqual(@as(usize, 4), getTotalBits(&[_]Segment{seg_fnc1_1}, 40));
+
+    // 2. FNC1 in second position
+    var buf_fnc1: [1]u8 = undefined;
+    const app_ind_a = try appIndicatorFromChar('A');
+    try testing.expectEqual(@as(u8, 165), app_ind_a); // 'A' = 65 + 100 = 165
+    const seg_fnc1_2 = makeFnc1Second(app_ind_a, &buf_fnc1);
+    try testing.expectEqual(Mode.fnc1_second, seg_fnc1_2.mode);
+    try testing.expectEqual(@as(usize, 0), seg_fnc1_2.num_chars);
+    try testing.expectEqual(@as(usize, 8), seg_fnc1_2.bit_length);
+    try testing.expectEqual(@as(u8, 165), seg_fnc1_2.data[0]);
+    // Overhead = 4 (mode) + 0 (ccbits) + 8 (app indicator payload) = 12 bits
+    try testing.expectEqual(@as(usize, 12), getTotalBits(&[_]Segment{seg_fnc1_2}, 1));
+    try testing.expectEqual(@as(usize, 12), getTotalBits(&[_]Segment{seg_fnc1_2}, 20));
+    try testing.expectEqual(@as(usize, 12), getTotalBits(&[_]Segment{seg_fnc1_2}, 40));
+
+    // 3. Application indicator helpers
+    const app_ind_num = try appIndicatorFromDigits("05");
+    try testing.expectEqual(@as(u8, 5), app_ind_num);
+    const app_ind_num99 = try appIndicatorFromDigits("99");
+    try testing.expectEqual(@as(u8, 99), app_ind_num99);
+    try testing.expectError(error.InvalidApplicationIndicator, appIndicatorFromDigits("9a"));
+
+    const app_ind_z = try appIndicatorFromChar('z');
+    try testing.expectEqual(@as(u8, 222), app_ind_z); // 'z' = 122 + 100 = 222
+    try testing.expectError(error.InvalidApplicationIndicator, appIndicatorFromChar('1'));
+    try testing.expectError(error.InvalidApplicationIndicator, appIndicatorFromChar('@'));
 }

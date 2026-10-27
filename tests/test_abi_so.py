@@ -31,6 +31,22 @@ class ZqrMatrix(ctypes.Structure):
     ]
 
 
+class ZqrOptions(ctypes.Structure):
+    _fields_ = [
+        ("min_version", ctypes.c_int),
+        ("max_version", ctypes.c_int),
+        ("ecc", ctypes.c_int),
+        ("mask", ctypes.c_int),
+        ("kanji", ctypes.c_int),
+        ("optimize", ctypes.c_int),
+        ("fnc1", ctypes.c_int),
+        ("fnc1_app_indicator", ctypes.c_uint8),
+        ("reserved", ctypes.c_uint8 * 3),
+        ("has_eci", ctypes.c_int),
+        ("eci", ctypes.c_uint32),
+    ]
+
+
 def verify_soname(so_path, expected_soname):
     env = os.environ.copy()
     env["LC_ALL"] = "C"
@@ -50,10 +66,11 @@ def verify_exported_symbols(so_path, tier_prefix):
             sym = parts[2]
             exported.append(sym)
 
-    # Shipped symbols must strictly match the 5 public symbols for this tier
+    # Shipped symbols must strictly match the 6 public symbols for this tier
     expected_symbols = {
         f"{tier_prefix}_encode",
         f"{tier_prefix}_encode_with_version",
+        f"{tier_prefix}_encode_advanced",
         f"{tier_prefix}_buffer_len",
         f"{tier_prefix}_max_version",
         f"{tier_prefix}_strerror",
@@ -74,7 +91,7 @@ def verify_exported_symbols(so_path, tier_prefix):
     for s in exported:
         assert not s.startswith("__ubsan"), f"Sanitizer leak: found {s} in {so_path}"
 
-    print(f"  [OK] Symbol isolation verified for {so_path}: exactly 5 symbols, 0 leaks")
+    print(f"  [OK] Symbol isolation verified for {so_path}: exactly 6 symbols, 0 leaks")
 
 
 def test_tier_functional(so_path, tier_num, max_v):
@@ -142,6 +159,76 @@ def test_tier_functional(so_path, tier_num, max_v):
         assert rc_boundary == 0, f"Tier {tier_num} expected 0 (ZQR_OK), got {rc_boundary}"
         assert out.version == 8
         assert out.size == 49
+
+    # Advanced API test with DP mixing: "ABC123" + "日本語"
+    fn_encode_advanced = getattr(lib, f"{prefix}_encode_advanced")
+    fn_encode_advanced.argtypes = [
+        ctypes.POINTER(ctypes.c_uint8),
+        ctypes.c_size_t,
+        ctypes.POINTER(ZqrOptions),
+        ctypes.POINTER(ctypes.c_uint8),
+        ctypes.c_size_t,
+        ctypes.POINTER(ZqrMatrix),
+    ]
+    fn_encode_advanced.restype = ctypes.c_int
+
+    mixed_text = "ABC123日本語".encode("utf-8")
+    mixed_arr = (ctypes.c_uint8 * len(mixed_text)).from_buffer_copy(mixed_text)
+    opts = ZqrOptions(
+        min_version=1,
+        max_version=max_v,
+        ecc=0, # LOW
+        mask=-1,
+        kanji=1,
+        optimize=1,
+        fnc1=0,
+        fnc1_app_indicator=0,
+        has_eci=0,
+        eci=0,
+    )
+    rc_adv = fn_encode_advanced(mixed_arr, len(mixed_text), ctypes.byref(opts), buf, expected_max_buf, ctypes.byref(out))
+    assert rc_adv == 0, f"encode_advanced failed with {rc_adv}"
+    assert out.size > 0
+
+    # Test FNC1 First Position (GS1 QR Code) against Nayuki reference
+    gs1_text = b"0101234567890128\x1D10BATCH1"
+    gs1_arr = (ctypes.c_uint8 * len(gs1_text)).from_buffer_copy(gs1_text)
+    gs1_opts = ZqrOptions(
+        min_version=1,
+        max_version=max_v,
+        ecc=0,
+        mask=0,
+        kanji=0,
+        optimize=1,
+        fnc1=1, # First Position
+        fnc1_app_indicator=0,
+        reserved=(ctypes.c_uint8 * 3)(),
+        has_eci=0,
+        eci=0,
+    )
+    rc_gs1 = fn_encode_advanced(gs1_arr, len(gs1_text), ctypes.byref(gs1_opts), buf, expected_max_buf, ctypes.byref(out))
+    assert rc_gs1 == 0, f"GS1 encode_advanced failed with {rc_gs1}"
+
+    # Verify against Nayuki oracle with FNC1 First Position and optimal DP segmentation
+    fnc1_mode = QrSegment.Mode(0x5, (0, 0, 0))
+    seg_fnc1 = QrSegment(fnc1_mode, 0, [])
+    seg_num = QrSegment.make_numeric("0101234567890128")
+    seg_byte = QrSegment.make_bytes(b"\x1D")
+    seg_alnum = QrSegment.make_alphanumeric("10BATCH1")
+    nayuki_qr = QrCode.encode_segments(
+        [seg_fnc1, seg_num, seg_byte, seg_alnum],
+        QrCode.Ecc.LOW,
+        minversion=1,
+        maxversion=max_v,
+        mask=0,
+    )
+    assert out.version == nayuki_qr.get_version(), f"GS1 Version mismatch: {out.version} vs {nayuki_qr.get_version()}"
+    assert out.size == nayuki_qr.get_size(), f"GS1 Size mismatch: {out.size} vs {nayuki_qr.get_size()}"
+    for y in range(out.size):
+        for x in range(out.size):
+            mod_actual = out.modules[y * out.size + x]
+            mod_expected = 1 if nayuki_qr.get_module(x, y) else 0
+            assert mod_actual == mod_expected, f"GS1 mismatch at ({x}, {y})"
 
     print(f"  [OK] Functional verification passed for {so_path}")
 

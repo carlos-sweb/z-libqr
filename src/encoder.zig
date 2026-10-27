@@ -17,6 +17,7 @@ const matrix = @import("matrix.zig");
 const interleave = @import("interleave.zig");
 const mask_mod = @import("mask.zig");
 const BitBuffer = @import("BitBuffer.zig").BitBuffer;
+const optimizer = @import("optimizer.zig");
 
 const Ecc = types.Ecc;
 const Mode = types.Mode;
@@ -36,6 +37,12 @@ pub fn Encoder(comptime max_version: u8) type {
         pub const tier_max_version: u8 = max_version;
         pub const max_size: u8 = tables.symbolSize(max_version);
         pub const max_buffer_len: usize = tables.moduleCount(max_version);
+        pub const max_tier_chars: usize = optimizer.maxCharsForTier(max_version);
+        pub const max_tier_segments: usize = switch (max_version) {
+            1...6 => 32,
+            7...10 => 48,
+            else => 128,
+        };
 
         /// Validates `version` against the QR standard and this tier's limit.
         pub fn checkVersion(version: u8) Error!void {
@@ -51,12 +58,32 @@ pub fn Encoder(comptime max_version: u8) type {
             return tables.moduleCount(version);
         }
 
+        /// Configuration options for advanced encoding.
+        pub const Options = struct {
+            ecc: Ecc = .low,
+            min_version: u8 = tables.min_version,
+            max_version: u8 = tier_max_version,
+            mask: ?u3 = null,
+            kanji: bool = false,
+            optimize: bool = true,
+            fnc1: ?types.Fnc1 = null,
+            eci: ?u32 = null,
+        };
+
         /// Selects the single most efficient Mode for `text`.
-        /// Source: nayuki/QR-Code-generator, c/qrcodegen.c, lines 152-178.
-        pub fn detectMode(text: []const u8) Mode {
+        /// When `enable_kanji` is true, tests if the entire text is encodable in JIS X 0208 Kanji mode.
+        /// Source: nayuki/QR-Code-generator, c/qrcodegen.c lines 152-178, and QrSegmentAdvanced.java.
+        pub fn detectModeWithKanji(text: []const u8, enable_kanji: bool) Mode {
             if (segment.isNumeric(text)) return .numeric;
             if (segment.isAlphanumeric(text)) return .alphanumeric;
+            if (enable_kanji and segment.isKanji(text)) return .kanji;
             return .byte;
+        }
+
+        /// Selects the single most efficient Mode for `text` using standard modes.
+        /// Source: nayuki/QR-Code-generator, c/qrcodegen.c, lines 152-178.
+        pub fn detectMode(text: []const u8) Mode {
+            return detectModeWithKanji(text, false);
         }
 
         /// Core pipeline to encode a slice of preconstructed segments into `buf`.
@@ -77,6 +104,25 @@ pub fn Encoder(comptime max_version: u8) type {
             }
             if (max_ver > max_version) {
                 return error.VersionExceedsTier;
+            }
+
+            // Validate FNC1 placement per ISO/IEC 18004 clause 7.4.8:
+            // FNC1 must be at the very start of the symbol, or preceded only by ECI.
+            var seen_data = false;
+            var seen_fnc1 = false;
+            for (segs) |seg| {
+                switch (seg.mode) {
+                    .eci => {
+                        if (seen_fnc1) return error.InvalidSegmentOrder;
+                    },
+                    .fnc1_first, .fnc1_second => {
+                        if (seen_data or seen_fnc1) return error.InvalidSegmentOrder;
+                        seen_fnc1 = true;
+                    },
+                    else => {
+                        seen_data = true;
+                    },
+                }
             }
 
             // 1. Find the smallest version in [min_ver .. max_ver] that can fit all segments
@@ -194,39 +240,225 @@ pub fn Encoder(comptime max_version: u8) type {
             };
         }
 
-        /// High-level API: detects mode, chooses optimal version (up to max_version) and best mask.
-        pub fn encode(buf: []u8, data: []const u8, ecc: Ecc) Error!QrMatrix {
+        /// Advanced encoding API with configurable options (ecl, version range, mask, kanji mode, DP optimizer).
+        pub fn encodeAdvanced(buf: []u8, data: []const u8, options: Options) Error!QrMatrix {
+            if (options.min_version < tables.min_version or options.min_version > tables.max_version or
+                options.max_version < tables.min_version or options.max_version > tables.max_version or
+                options.min_version > options.max_version)
+            {
+                return error.InvalidVersion;
+            }
+            if (options.max_version > max_version) {
+                return error.VersionExceedsTier;
+            }
             if (data.len == 0) {
+                var prefix_segs: [2]Segment = undefined;
+                var prefix_count: usize = 0;
+                var eci_buf: [3]u8 = undefined;
+                var fnc1_buf: [1]u8 = undefined;
+                if (options.eci) |eci_val| {
+                    prefix_segs[prefix_count] = segment.makeEci(eci_val, &eci_buf);
+                    prefix_count += 1;
+                }
+                if (options.fnc1) |fnc1_spec| {
+                    prefix_segs[prefix_count] = switch (fnc1_spec.mode) {
+                        .first => segment.makeFnc1First(),
+                        .second => segment.makeFnc1Second(fnc1_spec.app_indicator, &fnc1_buf),
+                    };
+                    prefix_count += 1;
+                }
                 return encodeSegmentsAdvanced(
                     buf,
-                    &[_]Segment{},
-                    tables.min_version,
-                    max_version,
-                    ecc,
-                    null,
+                    prefix_segs[0..prefix_count],
+                    options.min_version,
+                    options.max_version,
+                    options.ecc,
+                    options.mask,
                 );
             }
-            const mode = detectMode(data);
-            const needed_buf = segment.calcSegmentBufferSize(mode, data.len);
-            if (needed_buf > 2956) {
+
+            // Universal QR Model 2 capacity check: 7089 digits numeric, 2956 bytes byte mode
+            if (data.len > 7089 or (data.len > 2956 and !segment.isNumeric(data))) {
                 return error.DataTooLong;
             }
-            var seg_buf: [2956]u8 = undefined;
-            const seg = switch (mode) {
-                .numeric => segment.makeNumeric(data, seg_buf[0..needed_buf]),
-                .alphanumeric => segment.makeAlphanumeric(data, seg_buf[0..needed_buf]),
-                .byte => segment.makeBytes(data, seg_buf[0..needed_buf]),
-                else => unreachable,
-            };
 
-            return encodeSegmentsAdvanced(
-                buf,
-                &[_]Segment{seg},
-                tables.min_version,
-                max_version,
-                ecc,
-                null,
-            );
+            // Construct prefix segments: ECI first (if present), then FNC1 (if present)
+            // Source: ISO/IEC 18004:2015, clause 7.4.8.
+            var prefix_segs: [2]Segment = undefined;
+            var prefix_count: usize = 0;
+            var eci_buf: [3]u8 = undefined;
+            var fnc1_buf: [1]u8 = undefined;
+
+            if (options.eci) |eci_val| {
+                prefix_segs[prefix_count] = segment.makeEci(eci_val, &eci_buf);
+                prefix_count += 1;
+            }
+
+            if (options.fnc1) |fnc1_spec| {
+                prefix_segs[prefix_count] = switch (fnc1_spec.mode) {
+                    .first => segment.makeFnc1First(),
+                    .second => segment.makeFnc1Second(fnc1_spec.app_indicator, &fnc1_buf),
+                };
+                prefix_count += 1;
+            }
+
+            // Single-mode encoding if optimize is disabled
+            if (!options.optimize) {
+                const mode = detectModeWithKanji(data, options.kanji);
+                const needed_buf = segment.calcSegmentBufferSize(mode, data.len);
+                if (needed_buf > 2956) {
+                    return error.DataTooLong;
+                }
+                var seg_buf: [2956]u8 = undefined;
+                const seg = switch (mode) {
+                    .numeric => segment.makeNumeric(data, seg_buf[0..needed_buf]),
+                    .alphanumeric => segment.makeAlphanumeric(data, seg_buf[0..needed_buf]),
+                    .byte => segment.makeBytes(data, seg_buf[0..needed_buf]),
+                    .kanji => segment.makeKanji(data, seg_buf[0..needed_buf]) catch |err| switch (err) {
+                        error.BufferTooSmall => return error.BufferTooSmall,
+                        error.InvalidCharacter, error.InvalidUtf8 => unreachable,
+                    },
+                    else => unreachable,
+                };
+
+                var single_segs: [3]Segment = undefined;
+                @memcpy(single_segs[0..prefix_count], prefix_segs[0..prefix_count]);
+                single_segs[prefix_count] = seg;
+                return encodeSegmentsAdvanced(
+                    buf,
+                    single_segs[0 .. prefix_count + 1],
+                    options.min_version,
+                    options.max_version,
+                    options.ecc,
+                    options.mask,
+                );
+            }
+
+            // Multi-mode DP optimization (Increment 12B)
+            // Fast path: pure numeric is globally optimal as a single numeric segment
+            if (segment.isNumeric(data)) {
+                const needed_buf = segment.calcSegmentBufferSize(.numeric, data.len);
+                if (needed_buf > 2956) return error.DataTooLong;
+                var seg_buf: [2956]u8 = undefined;
+                const seg = segment.makeNumeric(data, seg_buf[0..needed_buf]);
+                var num_segs: [3]Segment = undefined;
+                @memcpy(num_segs[0..prefix_count], prefix_segs[0..prefix_count]);
+                num_segs[prefix_count] = seg;
+                return encodeSegmentsAdvanced(
+                    buf,
+                    num_segs[0 .. prefix_count + 1],
+                    options.min_version,
+                    options.max_version,
+                    options.ecc,
+                    options.mask,
+                );
+            }
+
+            var bt_buf: [max_tier_chars]u8 = undefined;
+            var seg_buf: [2956]u8 = undefined;
+            var segs: [max_tier_segments]Segment = undefined;
+            @memcpy(segs[0..prefix_count], prefix_segs[0..prefix_count]);
+
+            var chosen_version: ?u8 = null;
+            var final_seg_count: usize = 0;
+            var v: u8 = options.min_version;
+
+            while (v <= options.max_version) : (v += 1) {
+                if (v == options.min_version or v == 10 or v == 27) {
+                    const data_seg_count = optimizer.makeOptimizedSegments(
+                        data,
+                        v,
+                        options.kanji,
+                        segs[prefix_count..],
+                        &seg_buf,
+                        &bt_buf,
+                    ) catch |err| switch (err) {
+                        error.DataTooLong => {
+                            if (options.max_version < tables.max_version) return error.VersionExceedsTier;
+                            return error.DataTooLong;
+                        },
+                        error.BufferTooSmall => {
+                            // Adversarial case: > max_tier_segments transitions.
+                            // Fall back silently to single byte mode per specification.
+                            const needed_buf = segment.calcSegmentBufferSize(.byte, data.len);
+                            if (needed_buf > 2956) return error.DataTooLong;
+                            const byte_seg = segment.makeBytes(data, seg_buf[0..needed_buf]);
+                            var fallback_segs: [3]Segment = undefined;
+                            @memcpy(fallback_segs[0..prefix_count], prefix_segs[0..prefix_count]);
+                            fallback_segs[prefix_count] = byte_seg;
+                            return encodeSegmentsAdvanced(
+                                buf,
+                                fallback_segs[0 .. prefix_count + 1],
+                                options.min_version,
+                                options.max_version,
+                                options.ecc,
+                                options.mask,
+                            );
+                        },
+                        error.InvalidUtf8, error.InvalidCharacter => {
+                            // Fallback to single-mode byte for non-UTF8 binary data
+                            const needed_buf = segment.calcSegmentBufferSize(.byte, data.len);
+                            if (needed_buf > 2956) return error.DataTooLong;
+                            const byte_seg = segment.makeBytes(data, seg_buf[0..needed_buf]);
+                            var fallback_segs: [3]Segment = undefined;
+                            @memcpy(fallback_segs[0..prefix_count], prefix_segs[0..prefix_count]);
+                            fallback_segs[prefix_count] = byte_seg;
+                            return encodeSegmentsAdvanced(
+                                buf,
+                                fallback_segs[0 .. prefix_count + 1],
+                                options.min_version,
+                                options.max_version,
+                                options.ecc,
+                                options.mask,
+                            );
+                        },
+                    };
+                    final_seg_count = prefix_count + data_seg_count;
+                }
+                const cap_bits = @as(usize, tables.getNumDataCodewords(v, options.ecc)) * 8;
+                const needed_bits = segment.getTotalBits(segs[0..final_seg_count], v);
+                if (needed_bits != segment.LENGTH_OVERFLOW and needed_bits <= cap_bits) {
+                    chosen_version = v;
+                    break;
+                }
+            }
+
+            if (chosen_version) |cv| {
+                return encodeSegmentsAdvanced(
+                    buf,
+                    segs[0..final_seg_count],
+                    cv,
+                    cv,
+                    options.ecc,
+                    options.mask,
+                );
+            }
+
+            // Did not fit in options.max_version. Check if it fits in higher versions up to 40
+            if (options.max_version < tables.max_version) {
+                var v_check: u8 = options.max_version + 1;
+                while (v_check <= tables.max_version) : (v_check += 1) {
+                    const cap_bits = @as(usize, tables.getNumDataCodewords(v_check, options.ecc)) * 8;
+                    const needed_bits = segment.getTotalBits(segs[0..final_seg_count], v_check);
+                    if (needed_bits != segment.LENGTH_OVERFLOW and needed_bits <= cap_bits) {
+                        return error.VersionExceedsTier;
+                    }
+                }
+            }
+
+            return error.DataTooLong;
+        }
+
+        /// High-level API: detects mode, chooses optimal version (up to max_version) and best mask.
+        pub fn encode(buf: []u8, data: []const u8, ecc: Ecc) Error!QrMatrix {
+            return encodeAdvanced(buf, data, .{
+                .ecc = ecc,
+                .min_version = tables.min_version,
+                .max_version = max_version,
+                .mask = null,
+                .kanji = false,
+                .optimize = true,
+            });
         }
 
         /// Low-level API: forces version, ECC, and optional mask.
@@ -504,4 +736,198 @@ test "boundary versions: v40 maximal version" {
     const qr40 = try Encoder(40).encodeWithVersion(&buf40, "V40 MAXIMAL", 40, .high, 0);
     try testing.expectEqual(@as(u8, 40), qr40.version);
     try testing.expectEqual(@as(u8, 177), qr40.size);
+}
+
+test "Madoka Kanji golden vector against Nayuki" {
+    const madoka = "\xE3\x80\x8C\xE9\xAD\x94\xE6\xB3\x95\xE5\xB0\x91\xE5\xA5\xB3\xE3\x81\xBE\xE3\x81\xA9\xE3\x81\x8B\xE2\x98\x86\xE3\x83\x9E\xE3\x82\xAE\xE3\x82\xAB\xE3\x80\x8D\xE3\x81\xA3\xE3\x81\xA6\xE3\x80\x81\xE3\x80\x80\xD0\x98\xD0\x90\xD0\x98\xE3\x80\x80\xEF\xBD\x84\xEF\xBD\x85\xEF\xBD\x93\xEF\xBD\x95\xE3\x80\x80\xCE\xBA\xCE\xB1\xEF\xBC\x9F";
+
+    // 1. Verify single Kanji segment properties (matching Nayuki QrSegmentAdvanced.makeSegments)
+    var seg_buf: [100]u8 = undefined;
+    const seg = try segment.makeKanji(madoka, &seg_buf);
+    try testing.expectEqual(Mode.kanji, seg.mode);
+    try testing.expectEqual(@as(usize, 29), seg.num_chars);
+    try testing.expectEqual(@as(usize, 377), seg.bit_length);
+
+    // 2. Encode with Tier3 (v1..40) with kanji = true
+    var buf: [Encoder(40).max_buffer_len]u8 = undefined;
+    const qr = try Encoder(40).encodeAdvanced(&buf, madoka, .{
+        .ecc = .low,
+        .kanji = true,
+    });
+
+    try testing.expectEqual(@as(u8, 3), qr.version);
+    try testing.expectEqual(@as(u8, 29), qr.size);
+    try testing.expectEqual(@as(u3, 7), qr.mask);
+    try testing.expectEqual(Mode.kanji, qr.mode);
+
+    // 3. Bit-by-bit module matrix verification against Nayuki reference
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(qr.modules);
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+
+    var expected_digest: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&expected_digest, "80178e24a48431d63171f51c7e084780fd46861037811d645806f52cfedd8dd4");
+    try testing.expectEqualSlices(u8, &expected_digest, &digest);
+}
+
+test "Kanji edge cases" {
+    var buf: [Encoder(6).max_buffer_len]u8 = undefined;
+
+    // Case 1: Empty text with kanji: true
+    const qr_empty = try Encoder(6).encodeAdvanced(&buf, "", .{ .kanji = true });
+    try testing.expectEqual(@as(u8, 1), qr_empty.version);
+    try testing.expectEqual(@as(u8, 21), qr_empty.size);
+
+    // Case 2: Pure ASCII with kanji: true falls back to alphanumeric/numeric/byte, never kanji
+    const qr_ascii = try Encoder(6).encodeAdvanced(&buf, "HELLO WORLD", .{ .kanji = true });
+    try testing.expectEqual(Mode.alphanumeric, qr_ascii.mode);
+
+    // Case 3a: Mixed Kanji + ASCII with kanji: true and optimize: false falls back to byte mode (12A behavior)
+    const qr_mixed_no_opt = try Encoder(6).encodeAdvanced(&buf, "HELLO まどか", .{ .kanji = true, .optimize = false });
+    try testing.expectEqual(Mode.byte, qr_mixed_no_opt.mode);
+
+    // Case 3b: Mixed Kanji + ASCII with kanji: true and optimize: true splits into optimal segments
+    // "HELLO " is alphanumeric (segs[0].mode = .alphanumeric), "まどか" is kanji
+    const qr_mixed_opt = try Encoder(6).encodeAdvanced(&buf, "HELLO まどか", .{ .kanji = true, .optimize = true });
+    try testing.expectEqual(Mode.alphanumeric, qr_mixed_opt.mode);
+
+    // Case 4a: Unicode character outside JIS X 0208 with kanji: true and optimize: false falls back to byte mode
+    const qr_emoji_no_opt = try Encoder(6).encodeAdvanced(&buf, "まどか🎉", .{ .kanji = true, .optimize = false });
+    try testing.expectEqual(Mode.byte, qr_emoji_no_opt.mode);
+
+    // Case 4b: With optimize: true, "まどか" is kanji, "🎉" is byte
+    const qr_emoji_opt = try Encoder(6).encodeAdvanced(&buf, "まどか🎉", .{ .kanji = true, .optimize = true });
+    try testing.expectEqual(Mode.kanji, qr_emoji_opt.mode);
+
+    // Case 5: Direct makeKanji rejects characters outside JIS X 0208
+    var seg_buf: [100]u8 = undefined;
+    try testing.expectError(error.InvalidCharacter, segment.makeKanji("まどか🎉", &seg_buf));
+}
+
+test "12B DP optimization: size reduction v3 down to v2" {
+    var buf: [Encoder(6).max_buffer_len]u8 = undefined;
+
+    // "hello" (lowercase forces Byte in single-mode) + 40 digits
+    const mixed_input = "hello1234567890123456789012345678901234567890";
+
+    // 1. Without DP (optimize: false): 45 bytes in byte mode requires 372 bits -> exceeds v2-L (272 bits) -> selects v3
+    const qr_unopt = try Encoder(6).encodeAdvanced(&buf, mixed_input, .{
+        .ecc = .low,
+        .optimize = false,
+    });
+    try testing.expectEqual(@as(u8, 3), qr_unopt.version);
+    try testing.expectEqual(Mode.byte, qr_unopt.mode);
+
+    // 2. With DP (optimize: true): splits into Byte("hello") + Numeric(40 digits) -> 200 bits -> fits in v2-L!
+    const qr_opt = try Encoder(6).encodeAdvanced(&buf, mixed_input, .{
+        .ecc = .low,
+        .optimize = true,
+    });
+    try testing.expectEqual(@as(u8, 2), qr_opt.version);
+}
+
+test "12B DP regression: pure ASCII behavior preserved" {
+    var buf: [Encoder(6).max_buffer_len]u8 = undefined;
+
+    // Pure alphanumeric
+    const qr_alnum_v1 = try Encoder(6).encode(&buf, "HELLO WORLD", .medium);
+    const qr_alnum_opt = try Encoder(6).encodeAdvanced(&buf, "HELLO WORLD", .{ .ecc = .medium, .optimize = true });
+    try testing.expectEqual(qr_alnum_v1.version, qr_alnum_opt.version);
+    try testing.expectEqual(qr_alnum_v1.mask, qr_alnum_opt.mask);
+    try testing.expectEqual(qr_alnum_v1.mode, qr_alnum_opt.mode);
+    try testing.expectEqualSlices(u8, qr_alnum_v1.modules, qr_alnum_opt.modules);
+
+    // Pure numeric
+    const qr_num_v1 = try Encoder(6).encode(&buf, "1234567890", .medium);
+    const qr_num_opt = try Encoder(6).encodeAdvanced(&buf, "1234567890", .{ .ecc = .medium, .optimize = true });
+    try testing.expectEqual(qr_num_v1.version, qr_num_opt.version);
+    try testing.expectEqual(qr_num_v1.mask, qr_num_opt.mask);
+    try testing.expectEqual(qr_num_v1.mode, qr_num_opt.mode);
+    try testing.expectEqualSlices(u8, qr_num_v1.modules, qr_num_opt.modules);
+}
+
+test "Increment 13: FNC1 First Position (GS1 QR Code)" {
+    var buf: [Encoder(6).max_buffer_len]u8 = undefined;
+
+    // Real binary GS1 payload: AI 01 (14 digits fixed), GS (0x1D), AI 10 (variable alphanumeric)
+    const gs1_data = "0101234567890128\x1D10BATCH1";
+
+    const qr = try Encoder(6).encodeAdvanced(&buf, gs1_data, .{
+        .ecc = .low,
+        .fnc1 = .{ .mode = .first },
+        .optimize = true,
+    });
+
+    try testing.expectEqual(Mode.fnc1_first, qr.mode);
+    try testing.expect(qr.version >= 1 and qr.version <= 6);
+}
+
+test "Increment 13: FNC1 Second Position (AIM Application Indicator)" {
+    var buf: [Encoder(6).max_buffer_len]u8 = undefined;
+
+    // 1. With character application indicator ('A' + 100 = 165)
+    const app_ind_a = try segment.appIndicatorFromChar('A');
+    const qr_a = try Encoder(6).encodeAdvanced(&buf, "SERIAL12345", .{
+        .ecc = .medium,
+        .fnc1 = .{ .mode = .second, .app_indicator = app_ind_a },
+    });
+    try testing.expectEqual(Mode.fnc1_second, qr_a.mode);
+
+    // 2. With numeric 2-digit application indicator ("05" -> 5)
+    const app_ind_num = try segment.appIndicatorFromDigits("05");
+    const qr_num = try Encoder(6).encodeAdvanced(&buf, "TESTPAYLOAD", .{
+        .ecc = .medium,
+        .fnc1 = .{ .mode = .second, .app_indicator = app_ind_num },
+    });
+    try testing.expectEqual(Mode.fnc1_second, qr_num.mode);
+}
+
+test "Increment 13: ECI + FNC1 combination order" {
+    var buf: [Encoder(6).max_buffer_len]u8 = undefined;
+
+    // ISO/IEC 18004 clause 7.4.8: ECI must precede FNC1
+    const qr = try Encoder(6).encodeAdvanced(&buf, "0101234567890128", .{
+        .ecc = .low,
+        .eci = 26, // UTF-8 ECI
+        .fnc1 = .{ .mode = .first },
+    });
+    // The first segment in the bitstream is ECI, so qr.mode is .eci
+    try testing.expectEqual(Mode.eci, qr.mode);
+
+    // Verify rejection of invalid segment orders in encodeSegmentsAdvanced:
+    var eci_buf: [3]u8 = undefined;
+    const eci_seg = segment.makeEci(26, &eci_buf);
+    const fnc1_seg = segment.makeFnc1First();
+    var num_buf: [10]u8 = undefined;
+    const num_seg = segment.makeNumeric("12345", &num_buf);
+
+    // Valid: [ECI, FNC1, Data]
+    _ = try Encoder(6).encodeSegmentsAdvanced(&buf, &[_]Segment{ eci_seg, fnc1_seg, num_seg }, 1, 6, .low, null);
+
+    // Invalid: [FNC1, ECI, Data] - ECI cannot follow FNC1
+    try testing.expectError(error.InvalidSegmentOrder, Encoder(6).encodeSegmentsAdvanced(&buf, &[_]Segment{ fnc1_seg, eci_seg, num_seg }, 1, 6, .low, null));
+
+    // Invalid: [Data, FNC1] - FNC1 cannot follow data
+    try testing.expectError(error.InvalidSegmentOrder, Encoder(6).encodeSegmentsAdvanced(&buf, &[_]Segment{ num_seg, fnc1_seg }, 1, 6, .low, null));
+}
+
+test "Increment 13: Adversarial input with >128 segments falls back to byte mode" {
+    // Generate an adversarial alternating string "a12345a12345..." with 150 repetitions (300 transitions)
+    // Tier 3 has max_tier_segments = 128. With > 128 transitions, DP returns BufferTooSmall,
+    // which triggers silent fallback to single byte mode.
+    var adversarial_buf: [150 * 6]u8 = undefined;
+    for (0..150) |i| {
+        @memcpy(adversarial_buf[i * 6 .. (i + 1) * 6], "a12345");
+    }
+
+    var buf: [Encoder(40).max_buffer_len]u8 = undefined;
+    const qr = try Encoder(40).encodeAdvanced(&buf, &adversarial_buf, .{
+        .ecc = .low,
+        .optimize = true,
+    });
+
+    // Successfully encodes via byte mode fallback!
+    try testing.expect(qr.version >= 1 and qr.version <= 40);
+    try testing.expectEqual(Mode.byte, qr.mode);
 }

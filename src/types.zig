@@ -20,6 +20,24 @@ pub const Mode = enum(u4) {
     byte = 0x4,
     kanji = 0x8,
     eci = 0x7,
+    fnc1_first = 0x5,
+    fnc1_second = 0x9,
+};
+
+/// FNC1 operating mode defined in ISO/IEC 18004.
+pub const Fnc1Mode = enum(u2) {
+    /// FNC1 in first position: designates a GS1 QR Code symbol.
+    first = 1,
+    /// FNC1 in second position: designates an AIM application-specific format.
+    second = 2,
+};
+
+/// Configuration for FNC1 mode indicator.
+pub const Fnc1 = struct {
+    mode: Fnc1Mode,
+    /// 8-bit Application Indicator (0..255).
+    /// Used only when `mode == .second`. Ignored when `mode == .first`.
+    app_indicator: u8 = 0,
 };
 
 /// Errors returned by the encoder.
@@ -34,6 +52,8 @@ pub const Error = error{
     InvalidVersion,
     /// The caller-provided module buffer is smaller than size * size.
     BufferTooSmall,
+    /// Segment order violates ISO/IEC 18004 (e.g. FNC1 after data, or ECI after FNC1).
+    InvalidSegmentOrder,
 };
 
 /// An encoded QR symbol.

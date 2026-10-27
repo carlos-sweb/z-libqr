@@ -5,6 +5,8 @@ Generates compliant QR codes from version 1 up to 40, error correction levels L,
 
 Output is strictly the module matrix (0 = light, 1 = dark), without quiet zone or image rendering.
 
+This library is a from-scratch Zig port of the algorithm described in Project Nayuki's QR Code generator (MIT).
+
 ## Feature Status
 
 | Category | Feature | Status | Notes |
@@ -18,14 +20,15 @@ Output is strictly the module matrix (0 = light, 1 = dark), without quiet zone o
 | | Byte Mode | **Implemented** | Arbitrary binary data and UTF-8 bytes |
 | | ECI Mode | **Implemented** | Extended Channel Interpretation headers |
 | | Multi-Segment Input | **Implemented** | Manual heterogeneous segment composition |
-| | Kanji Mode | *Optional / Deferred* | Pre-encoded Shift-JIS works via Byte mode |
-| | Optimal Mode Optimizer | *Optional / Deferred* | Auto-segmentation using dynamic programming |
-| | Structured Append / FNC1 | *Out of Scope* | Not in v1 specification |
+| | Kanji Mode | **Implemented** | JIS X 0208 UTF-8 to 13-bit QR Kanji mode |
+| | Optimal Mode Optimizer | **Implemented** | Multi-mode DP mixing (Numeric + Alphanumeric + Byte + Kanji) |
+| | FNC1 Mode | **Implemented** | First Position (GS1) & Second Position (AIM Application Indicator) |
+| | Structured Append | *Out of Scope* | Multi-symbol linking not in standard scope |
 | **Architecture**| Zero-Allocation Core | **Implemented** | Caller provides output module buffer |
-| | Embedded Stack Budget | **Implemented** | Peak stack usage ~6.6 KB in core pipeline |
+| | Embedded Stack Budget | **Implemented** | Peak stack ~6.6 KB (single-mode), ~12.9 KB (Tier 3 full DP) |
 | | Symbol Isolation | **Implemented** | Multi-tier static linking without symbol collisions |
-| | C ABI Export | **Implemented** | 5 stable symbols per tier, negative error codes |
-| | Shared Libraries (.so) | **Implemented** | Valid ELF SONAME (`libzqr_tN.so.0`), zero UBSan leaks |
+| | C ABI Export | **Implemented** | 6 stable symbols per tier, negative error codes |
+| | Shared Libraries (.so) | **Implemented** | Valid ELF SONAME (`libzqr_tN.so.1`), zero UBSan leaks |
 
 ## Compatibility
 
@@ -40,7 +43,7 @@ Output is strictly the module matrix (0 = light, 1 = dark), without quiet zone o
 
 1. **Path 1 — Zig Module**: For Zig 0.17 projects. Add via `build.zig.zon` and use `@import("zqr")`.
 2. **Path 2 — Static C Libraries**: `libzqr_t1.a`, `libzqr_t2.a`, `libzqr_t3.a`. Stable C ABI linkable by any toolchain.
-3. **Path 3 — Dynamic Libraries**: `libzqr_t1.so`, `libzqr_t2.so`, `libzqr_t3.so` (version 1.0.0, SONAME `libzqr_tN.so.1`).
+3. **Path 3 — Dynamic Libraries**: `libzqr_t1.so`, `libzqr_t2.so`, `libzqr_t3.so` (version 1.1.0, SONAME `libzqr_tN.so.1`).
 
 ### Tiers
 
@@ -55,9 +58,23 @@ To optimize binary size and memory footprint for constrained environments, `z-li
 ## Memory Model
 
 The core encoder requires no memory allocator. Callers provide a module buffer sized for the symbol.
-Peak stack usage is **~6.6 KB** in the core pipeline (fixed stack buffers for data codewords and Reed-Solomon interleaving), making it suitable for bare-metal, RTOS, and embedded environments.
+- **Core Pipeline (`optimize: false` / standard `encode`)**: Peak stack usage is **~6.6 KB** in Tier 3 (~1.2 KB in Tier 1), bounded by fixed stack buffers for data codewords (2956 B) and Reed-Solomon interleaving (3706 B).
+- **Dynamic Programming Multi-Mode Optimizer (`optimize: true`)**: Uses fixed static stack memory for DP backtracking (1 byte per character, dimensioned to each tier's theoretical character limit: 322 B in Tier 1, 652 B in Tier 2, 7089 B in Tier 3). Peak stack usage with optimization enabled is:
+  - **Tier 1:** ~1.8 KB
+  - **Tier 2:** ~3.2 KB
+  - **Tier 3:** ~12.9 KB (in the worst-case 7089-character payload)
+- **Segment Buffer & Adversarial Fallback**: Segment counts are bounded per tier (32 for T1, 48 for T2, 128 for T3). In adversarial cases with >128 segments, the optimizer falls back silently to single byte mode; the QR code remains strictly valid and compliant, but may use a higher version than theoretically optimal.
+- **Zero Allocator Guarantee**: 0 heap allocations in all encoding paths.
 
 Any input payload that would exceed buffer capacity or QR Model 2 limits is rejected with `ZQR_ERR_DATA_TOO_LONG` before any buffer operations take place.
+
+## FNC1 and GS1 QR Codes
+
+`z-libqr` supports FNC1 modes defined in ISO/IEC 18004:2015 clause 7.4.8:
+- **First Position (`0101`)**: Identifies standard **GS1 QR Code** symbols.
+- **Second Position (`1001`)**: Identifies AIM application-specific symbols with an 8-bit Application Indicator (0..99 as numeric value, or `c + 100` for ASCII letters `'A'..'Z'` / `'a'..'z'`).
+- **ECI + FNC1 Ordering**: When both ECI and FNC1 are configured, `z-libqr` automatically orders them as `[ECI, FNC1, data...]` as mandated by ISO/IEC 18004.
+- **GS1 Syntax Notice**: FNC1 insertion only. The caller must insert `0x1D` (ASCII GS) between variable-length fields (e.g. `0101234567890128\x1D10BATCH1`); the encoder does not parse or validate GS1 Application Identifiers (AIs).
 
 ## Usage Examples
 
@@ -72,6 +89,22 @@ const qr = try zqr.Tier1.encode(&buf, "HELLO WORLD", .medium);
 
 // Access output matrix (size * size bytes, values 0 or 1)
 const is_dark = qr.modules[y * qr.size + x] == 1;
+
+// Advanced encoding with multi-mode DP mixing (e.g. ASCII + Japanese Kanji)
+const qr_mixed = try zqr.Tier1.encodeAdvanced(&buf, "ABC123日本語", .{
+    .ecc = .low,
+    .kanji = true,
+    .optimize = true, // dynamically finds optimal mode switching points
+});
+
+// GS1 QR Code: 0x1D separates variable-length fields.
+// The DP optimizer fits this in Version 1-L; without
+// optimize, it would require Version 2-L.
+const qr_gs1 = try zqr.Tier1.encodeAdvanced(&buf, "0101234567890128\x1D10BATCH1", .{
+    .ecc = .low,
+    .fnc1 = .{ .mode = .first },
+    .optimize = true,
+});
 ```
 
 ### Path 2: C API
@@ -126,6 +159,12 @@ python3 tests/test_abi_so.py   # Validates FFI loading, SONAME tags, and symbol 
 Additional testing commands:
 - `zig build test-c-integration`: Compiles and runs the native C ABI integration suite standalone (linking all 3 `.a` archives simultaneously).
 - `python3 tools/gen_vectors.py --exhaustive`: Verifies all 1280 possible (version × ECC × mask) combinations bit-by-bit against Project Nayuki's reference implementation.
+
+## Alternatives
+
+- **libqrencode** (C, LGPL): higher throughput, but C only and LGPL licensed.
+- **Nayuki's QR Code generator** (multi-language, MIT): the reference implementation this port is based on.
+- **ZXing** (Java / C++, Apache 2.0): includes a barcode scanner/decoder; `z-libqr` is encoder-only.
 
 ## License
 

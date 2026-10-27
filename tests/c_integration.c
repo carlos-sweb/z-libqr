@@ -10,7 +10,7 @@ int main(void) {
 
     // 1. Verify Header Definitions
     assert(ZQR_VERSION_MAJOR == 1);
-    assert(ZQR_VERSION_MINOR == 0);
+    assert(ZQR_VERSION_MINOR == 1);
     assert(ZQR_VERSION_PATCH == 0);
     assert(ZQR_OK == 0);
     assert(ZQR_ERR_DATA_TOO_LONG == -1);
@@ -20,6 +20,7 @@ int main(void) {
     assert(ZQR_ERR_INVALID_MASK == -5);
     assert(ZQR_ERR_BUFFER_TOO_SMALL == -6);
     assert(ZQR_ERR_NULL_POINTER == -7);
+    assert(ZQR_ERR_INVALID_SEGMENT_ORDER == -8);
 
     // 2. Multi-tier Simultaneous Linkage and Symbol Isolation
     // Calling functions from libzqr_t1.a, libzqr_t2.a, and libzqr_t3.a linked in the same binary.
@@ -94,6 +95,52 @@ int main(void) {
     assert(zqr_t1_encode((const uint8_t *)"HELLO", 5, ZQR_ECC_MEDIUM, buf_t1, sizeof(buf_t1), NULL) == ZQR_ERR_NULL_POINTER);
     assert(zqr_t1_encode((const uint8_t *)"HELLO", 5, 99, buf_t1, sizeof(buf_t1), &m1) == ZQR_ERR_INVALID_ECC);
     assert(zqr_t1_encode((const uint8_t *)"HELLO", 5, ZQR_ECC_MEDIUM, buf_t1, 10, &m1) == ZQR_ERR_BUFFER_TOO_SMALL);
+
+    // 7. Advanced encoding with multi-mode DP mixing
+    zqr_options opts = {
+        .min_version = 1,
+        .max_version = 6,
+        .ecc = ZQR_ECC_LOW,
+        .mask = -1,
+        .kanji = 1,
+        .optimize = 1,
+    };
+    const char *mixed = "ABC123日本語";
+    rc = zqr_t1_encode_advanced((const uint8_t *)mixed, strlen(mixed), &opts, buf_t1, sizeof(buf_t1), &m1);
+    assert(rc == ZQR_OK);
+    assert(m1.version >= 1 && m1.version <= 6);
+    assert(m1.size > 0);
+
+    // 8. FNC1 first position (GS1 QR Code)
+    zqr_options gs1_opts = {
+        .min_version = 1,
+        .max_version = 6,
+        .ecc = ZQR_ECC_LOW,
+        .mask = -1,
+        .kanji = 0,
+        .optimize = 1,
+        .fnc1 = ZQR_FNC1_FIRST,
+    };
+    const char *gs1_data = "0101234567890128\x1D" "10BATCH1";
+    rc = zqr_t1_encode_advanced((const uint8_t *)gs1_data, strlen(gs1_data), &gs1_opts, buf_t1, sizeof(buf_t1), &m1);
+    assert(rc == ZQR_OK);
+    assert(m1.version >= 1 && m1.version <= 6);
+
+    // 9. FNC1 second position (AIM Application Indicator)
+    zqr_options fnc1_2_opts = {
+        .min_version = 1,
+        .max_version = 6,
+        .ecc = ZQR_ECC_LOW,
+        .mask = -1,
+        .kanji = 0,
+        .optimize = 1,
+        .fnc1 = ZQR_FNC1_SECOND,
+        .fnc1_app_indicator = 'A' + 100, // 165 per ISO/IEC 18004
+    };
+    const char *app_data = "SERIAL12345";
+    rc = zqr_t1_encode_advanced((const uint8_t *)app_data, strlen(app_data), &fnc1_2_opts, buf_t1, sizeof(buf_t1), &m1);
+    assert(rc == ZQR_OK);
+    assert(m1.version >= 1 && m1.version <= 6);
 
     printf("All C ABI integration assertions passed successfully.\n");
     return 0;

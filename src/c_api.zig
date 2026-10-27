@@ -21,6 +21,21 @@ pub const Matrix = extern struct {
     modules: ?[*]const u8,
 };
 
+/// Mirror of `zqr_options` in include/zqr.h.
+pub const Options = extern struct {
+    min_version: c_int,
+    max_version: c_int,
+    ecc: c_int,
+    mask: c_int,
+    kanji: c_int,
+    optimize: c_int,
+    fnc1: c_int,
+    fnc1_app_indicator: u8,
+    reserved: [3]u8,
+    has_eci: c_int,
+    eci: u32,
+};
+
 comptime {
     // Layout is part of the ABI: 8 bytes of header, then the pointer.
     std.debug.assert(@offsetOf(Matrix, "modules") == 8);
@@ -37,6 +52,7 @@ pub const Status = enum(c_int) {
     invalid_mask = -5,
     buffer_too_small = -6,
     null_pointer = -7,
+    invalid_segment_order = -8,
 
     pub fn code(self: Status) c_int {
         return @backingInt(self);
@@ -48,6 +64,7 @@ pub const Status = enum(c_int) {
             error.VersionExceedsTier => .version_exceeds_tier,
             error.InvalidVersion => .invalid_version,
             error.BufferTooSmall => .buffer_too_small,
+            error.InvalidSegmentOrder => .invalid_segment_order,
         };
     }
 
@@ -61,6 +78,7 @@ pub const Status = enum(c_int) {
             .invalid_mask => "mask must be -1 (automatic) or 0...7",
             .buffer_too_small => "module buffer is smaller than size * size bytes",
             .null_pointer => "a required pointer argument is NULL",
+            .invalid_segment_order => "segment ordering violates ISO/IEC 18004 specification",
         };
     }
 };
@@ -144,6 +162,59 @@ pub fn cWrapper(comptime max_version: u8, comptime prefix: []const u8) type {
             return Status.ok.code();
         }
 
+        pub fn encodeAdvanced(
+            data: ?[*]const u8,
+            data_len: usize,
+            opts: ?*const Options,
+            buf: ?[*]u8,
+            buf_len: usize,
+            out: ?*Matrix,
+        ) callconv(.c) c_int {
+            const out_ptr = out orelse return Status.null_pointer.code();
+            const bytes = constSlice(data, data_len) orelse return Status.null_pointer.code();
+            const buf_ptr = buf orelse return Status.null_pointer.code();
+            const o = opts orelse return Status.null_pointer.code();
+
+            const level = parseEcc(o.ecc) orelse return Status.invalid_ecc.code();
+            const mask_val = parseMask(o.mask) catch return Status.invalid_mask.code();
+
+            const min_v: u8 = if (o.min_version <= 0) zqr.min_version else blk: {
+                if (o.min_version < zqr.min_version or o.min_version > zqr.max_version)
+                    return Status.invalid_version.code();
+                break :blk @intCast(o.min_version);
+            };
+
+            const max_v: u8 = if (o.max_version <= 0) max_version else blk: {
+                if (o.max_version < zqr.min_version or o.max_version > zqr.max_version)
+                    return Status.invalid_version.code();
+                if (o.max_version > max_version)
+                    return Status.version_exceeds_tier.code();
+                break :blk @intCast(o.max_version);
+            };
+
+            const fnc1_opt: ?zqr.Fnc1 = switch (o.fnc1) {
+                1 => .{ .mode = .first },
+                2 => .{ .mode = .second, .app_indicator = o.fnc1_app_indicator },
+                else => null,
+            };
+
+            const eci_opt: ?u32 = if (o.has_eci != 0) o.eci else null;
+
+            const m = E.encodeAdvanced(buf_ptr[0..buf_len], bytes, .{
+                .ecc = level,
+                .min_version = min_v,
+                .max_version = max_v,
+                .mask = mask_val,
+                .kanji = o.kanji != 0,
+                .optimize = o.optimize != 0,
+                .fnc1 = fnc1_opt,
+                .eci = eci_opt,
+            }) catch |err| return Status.fromError(err).code();
+
+            writeOut(out_ptr, m);
+            return Status.ok.code();
+        }
+
         /// Required buffer length for `version`; 0 means "largest version of
         /// this tier". Returns 0 if `version` is invalid or above the tier.
         pub fn bufferLen(version: c_int) callconv(.c) usize {
@@ -167,6 +238,7 @@ pub fn cWrapper(comptime max_version: u8, comptime prefix: []const u8) type {
         comptime {
             @export(&encode, .{ .name = prefix ++ "_encode" });
             @export(&encodeWithVersion, .{ .name = prefix ++ "_encode_with_version" });
+            @export(&encodeAdvanced, .{ .name = prefix ++ "_encode_advanced" });
             @export(&bufferLen, .{ .name = prefix ++ "_buffer_len" });
             @export(&maxVersion, .{ .name = prefix ++ "_max_version" });
             @export(&strerror, .{ .name = prefix ++ "_strerror" });

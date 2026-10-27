@@ -18,6 +18,8 @@ const encoder = @import("encoder.zig");
 
 pub const Ecc = types.Ecc;
 pub const Mode = types.Mode;
+pub const Fnc1Mode = types.Fnc1Mode;
+pub const Fnc1 = types.Fnc1;
 pub const Error = types.Error;
 pub const QrMatrix = types.QrMatrix;
 
@@ -31,7 +33,18 @@ pub const Segment = segment.Segment;
 pub const makeNumeric = segment.makeNumeric;
 pub const makeAlphanumeric = segment.makeAlphanumeric;
 pub const makeBytes = segment.makeBytes;
+pub const makeKanji = segment.makeKanji;
 pub const makeEci = segment.makeEci;
+pub const makeFnc1First = segment.makeFnc1First;
+pub const makeFnc1Second = segment.makeFnc1Second;
+pub const appIndicatorFromChar = segment.appIndicatorFromChar;
+pub const appIndicatorFromDigits = segment.appIndicatorFromDigits;
+
+pub const kanji = @import("kanji.zig");
+pub const isKanji = kanji.isKanji;
+pub const toQrKanji = kanji.toQrKanji;
+
+pub const optimizer = @import("optimizer.zig");
 
 /// Predefined tiers, matching the distributed C libraries.
 pub const Tier1 = Encoder(6);
@@ -44,6 +57,9 @@ test {
     _ = gf256;
     _ = BitBuffer;
     _ = segment;
+    _ = kanji;
+    _ = @import("kanji_table.zig");
+    _ = optimizer;
     _ = matrix;
     _ = interleave;
     _ = mask;
