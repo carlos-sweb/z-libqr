@@ -52,9 +52,19 @@ pub const SequenceOptions = extern struct {
     symbol_count: c_int,
 };
 
+/// Mirror of `zqr_render_options` in include/zqr.h.
+pub const RenderOptions = extern struct {
+    quiet_zone: u8,
+    scale: u8,
+    reserved: [2]u8,
+    foreground: u32,
+    background: u32,
+};
+
 comptime {
     // Layout is part of the ABI: 8 bytes of header, then the pointer.
     std.debug.assert(@offsetOf(Matrix, "modules") == 8);
+    std.debug.assert(@sizeOf(RenderOptions) == 12);
 }
 
 /// Stable status codes. Values never change once released; new codes get
@@ -69,6 +79,7 @@ pub const Status = enum(c_int) {
     buffer_too_small = -6,
     null_pointer = -7,
     invalid_segment_order = -8,
+    unsupported = -9,
 
     pub fn code(self: Status) c_int {
         return @backingInt(self);
@@ -81,6 +92,7 @@ pub const Status = enum(c_int) {
             error.InvalidVersion => .invalid_version,
             error.BufferTooSmall => .buffer_too_small,
             error.InvalidSegmentOrder => .invalid_segment_order,
+            error.Unsupported => .unsupported,
         };
     }
 
@@ -95,6 +107,7 @@ pub const Status = enum(c_int) {
             .buffer_too_small => "module buffer is smaller than size * size bytes",
             .null_pointer => "a required pointer argument is NULL",
             .invalid_segment_order => "segment ordering violates ISO/IEC 18004 specification",
+            .unsupported => "requested feature or format is not supported or was disabled at build time",
         };
     }
 };
@@ -319,6 +332,108 @@ pub fn cWrapper(comptime max_version: u8, comptime prefix: []const u8) type {
             return Status.ok.code();
         }
 
+        /// Renders matrix as an SVG document string.
+        /// If `buf` is null, returns ZQR_OK and sets `*out_len` to the required buffer length (dry-run).
+        /// If `buf` is non-null but `buf_len` is too small, returns ZQR_ERR_BUFFER_TOO_SMALL.
+        pub fn renderSvg(
+            matrix: ?*const Matrix,
+            opts: ?*const RenderOptions,
+            buf: ?[*]u8,
+            buf_len: usize,
+            out_len: ?*usize,
+        ) callconv(.c) c_int {
+            if (matrix == null or out_len == null) return Status.null_pointer.code();
+            const m = matrix.?;
+            if (m.modules == null or m.size == 0) return Status.null_pointer.code();
+
+            const ropts: zqr.render.RenderOptions = if (opts) |o| .{
+                .quiet_zone = o.quiet_zone,
+                .scale = o.scale,
+                .foreground = o.foreground,
+                .background = o.background,
+            } else .{};
+
+            const qr_m = zqr.QrMatrix{
+                .version = m.version,
+                .size = m.size,
+                .ecc = @fromBackingInt(@intCast(m.ecc)),
+                .mask = @truncate(m.mask),
+                .mode = @fromBackingInt(@intCast(m.mode)),
+                .modules = m.modules.?[0 .. @as(usize, m.size) * m.size],
+            };
+
+            const needed = zqr.render.calcSvgLen(qr_m, ropts);
+            if (buf == null) {
+                out_len.?.* = needed;
+                return Status.ok.code();
+            }
+
+            if (buf_len < needed) {
+                return Status.buffer_too_small.code();
+            }
+
+            const written = zqr.render.renderSvgBuffer(qr_m, ropts, buf.?[0..buf_len]) catch {
+                return Status.buffer_too_small.code();
+            };
+
+            out_len.?.* = written;
+            return Status.ok.code();
+        }
+
+        /// Renders matrix as a PNG image file.
+        /// If `buf` is null, returns ZQR_OK and sets `*out_len` to the upper-bound buffer length.
+        /// If `buf` is non-null but `buf_len` is too small, returns ZQR_ERR_BUFFER_TOO_SMALL.
+        pub fn renderPng(
+            matrix: ?*const Matrix,
+            opts: ?*const RenderOptions,
+            buf: ?[*]u8,
+            buf_len: usize,
+            out_len: ?*usize,
+        ) callconv(.c) c_int {
+            const build_options = @import("build_options");
+            if (!build_options.enable_png) {
+                return Status.unsupported.code();
+            }
+
+            if (matrix == null or out_len == null) return Status.null_pointer.code();
+            const m = matrix.?;
+            if (m.modules == null or m.size == 0) return Status.null_pointer.code();
+
+            const ropts: zqr.render.RenderOptions = if (opts) |o| .{
+                .quiet_zone = o.quiet_zone,
+                .scale = o.scale,
+                .foreground = o.foreground,
+                .background = o.background,
+            } else .{};
+
+            const qr_m = zqr.QrMatrix{
+                .version = m.version,
+                .size = m.size,
+                .ecc = @fromBackingInt(@intCast(m.ecc)),
+                .mask = @truncate(m.mask),
+                .mode = @fromBackingInt(@intCast(m.mode)),
+                .modules = m.modules.?[0 .. @as(usize, m.size) * m.size],
+            };
+
+            const max_bound = zqr.render.calcPngMaxBound(qr_m.size, ropts);
+            if (buf == null) {
+                out_len.?.* = max_bound;
+                return Status.ok.code();
+            }
+
+            const written = zqr.render.renderPngBuffer(std.heap.c_allocator, qr_m, ropts, buf.?[0..buf_len]) catch |err| {
+                return switch (err) {
+                    error.BufferTooSmall => Status.buffer_too_small.code(),
+                    error.NullPointer => Status.null_pointer.code(),
+                    error.Unsupported => Status.unsupported.code(),
+                    else => Status.data_too_long.code(),
+                };
+            };
+
+            out_len.?.* = written;
+            return Status.ok.code();
+        }
+
         /// Required buffer length for `version`; 0 means "largest version of
         /// this tier". Returns 0 if `version` is invalid or above the tier.
         pub fn bufferLen(version: c_int) callconv(.c) usize {
@@ -344,6 +459,8 @@ pub fn cWrapper(comptime max_version: u8, comptime prefix: []const u8) type {
             @export(&encodeWithVersion, .{ .name = prefix ++ "_encode_with_version" });
             @export(&encodeAdvanced, .{ .name = prefix ++ "_encode_advanced" });
             @export(&encodeSequence, .{ .name = prefix ++ "_encode_sequence" });
+            @export(&renderSvg, .{ .name = prefix ++ "_render_svg" });
+            @export(&renderPng, .{ .name = prefix ++ "_render_png" });
             @export(&bufferLen, .{ .name = prefix ++ "_buffer_len" });
             @export(&sequenceBufferLen, .{ .name = prefix ++ "_sequence_buffer_len" });
             @export(&maxVersion, .{ .name = prefix ++ "_max_version" });

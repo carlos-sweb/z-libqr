@@ -11,6 +11,11 @@ const tiers = [_][]const u8{ "t1", "t2", "t3" };
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const enable_png = b.option(bool, "enable-png", "Enable PNG rendering via libpng (default: true)") orelse true;
+
+    const options = b.addOptions();
+    options.addOption(bool, "enable_png", enable_png);
+    const options_mod = options.createModule();
 
     // Path 1: Zig source module, consumed via build.zig.zon + @import("zqr").
     // `optimize` is intentionally left unset so that it is inherited from
@@ -18,7 +23,19 @@ pub fn build(b: *std.Build) void {
     const zqr = b.addModule("zqr", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
+        .imports = &.{
+            .{ .name = "build_options", .module = options_mod },
+        },
     });
+    if (enable_png) {
+        zqr.addCSourceFile(.{
+            .file = b.path("c/zqr_png_wrapper.c"),
+            .flags = &[_][]const u8{ "-std=c99", "-Wall", "-Wextra" },
+        });
+        zqr.addIncludePath(b.path("c"));
+        zqr.linkSystemLibrary("png", .{});
+        zqr.link_libc = true;
+    }
 
     const test_step = b.step("test", "Run all tests and build every library artifact");
 
@@ -26,14 +43,20 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(zqr_tests).step);
 
     // Tests for the C ABI layer (status-code mapping, argument validation).
-    const c_api_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/c_api.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "zqr", .module = zqr }},
-        }),
+    const c_api_mod = b.createModule(.{
+        .root_source_file = b.path("src/c_api.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "zqr", .module = zqr },
+            .{ .name = "build_options", .module = options_mod },
+        },
     });
+    if (enable_png) {
+        c_api_mod.linkSystemLibrary("png", .{});
+        c_api_mod.link_libc = true;
+    }
+    const c_api_tests = b.addTest(.{ .root_module = c_api_mod });
     test_step.dependOn(&b.addRunArtifact(c_api_tests).step);
 
     // Golden fixture tests against Nayuki reference vectors
@@ -42,7 +65,10 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("tests/golden_test.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "zqr", .module = zqr }},
+            .imports = &.{
+                .{ .name = "zqr", .module = zqr },
+                .{ .name = "build_options", .module = options_mod },
+            },
         }),
     });
     test_step.dependOn(&b.addRunArtifact(golden_tests).step);
@@ -55,7 +81,10 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/c_" ++ tier ++ ".zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "zqr", .module = zqr }},
+            .imports = &.{
+                .{ .name = "zqr", .module = zqr },
+                .{ .name = "build_options", .module = options_mod },
+            },
             // There is no C code in these libraries; without this, Debug
             // builds bundle the UBSan runtime and the .so exports ~35
             // `__ubsan_handle_*` symbols (and grows from ~84 KB to ~10 MB).
@@ -63,6 +92,10 @@ pub fn build(b: *std.Build) void {
             // Allow the static archives to be linked into shared objects.
             .pic = true,
         });
+        if (enable_png) {
+            c_root.linkSystemLibrary("png", .{});
+            c_root.link_libc = true;
+        }
 
         const static_lib = b.addLibrary(.{
             .name = "zqr_" ++ tier,
@@ -99,6 +132,9 @@ pub fn build(b: *std.Build) void {
         .flags = &[_][]const u8{ "-std=c99", "-Wall", "-Wextra" },
     });
     c_mod.addIncludePath(b.path("include"));
+    if (enable_png) {
+        c_mod.linkSystemLibrary("png", .{});
+    }
     for (static_libs) |lib| {
         c_mod.linkLibrary(lib);
     }

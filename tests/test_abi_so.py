@@ -13,6 +13,8 @@ import os
 import sys
 import subprocess
 import ctypes
+import io
+from PIL import Image
 
 # Add tools directory for Nayuki oracle and local segno package
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
@@ -67,6 +69,16 @@ class ZqrSequenceOptions(ctypes.Structure):
     ]
 
 
+class ZqrRenderOptions(ctypes.Structure):
+    _fields_ = [
+        ("quiet_zone", ctypes.c_uint8),
+        ("scale", ctypes.c_uint8),
+        ("reserved", ctypes.c_uint8 * 2),
+        ("foreground", ctypes.c_uint32),
+        ("background", ctypes.c_uint32),
+    ]
+
+
 def verify_soname(so_path, expected_soname):
     env = os.environ.copy()
     env["LC_ALL"] = "C"
@@ -86,12 +98,14 @@ def verify_exported_symbols(so_path, tier_prefix):
             sym = parts[2]
             exported.append(sym)
 
-    # Shipped symbols must strictly match the 8 public symbols for this tier
+    # Shipped symbols must strictly match the 10 public symbols for this tier
     expected_symbols = {
         f"{tier_prefix}_encode",
         f"{tier_prefix}_encode_with_version",
         f"{tier_prefix}_encode_advanced",
         f"{tier_prefix}_encode_sequence",
+        f"{tier_prefix}_render_svg",
+        f"{tier_prefix}_render_png",
         f"{tier_prefix}_buffer_len",
         f"{tier_prefix}_sequence_buffer_len",
         f"{tier_prefix}_max_version",
@@ -113,7 +127,7 @@ def verify_exported_symbols(so_path, tier_prefix):
     for s in exported:
         assert not s.startswith("__ubsan"), f"Sanitizer leak: found {s} in {so_path}"
 
-    print(f"  [OK] Symbol isolation verified for {so_path}: exactly 8 symbols, 0 leaks")
+    print(f"  [OK] Symbol isolation verified for {so_path}: exactly 10 symbols, 0 leaks")
 
 
 def test_tier_functional(so_path, tier_num, max_v):
@@ -402,6 +416,141 @@ def test_tier_functional(so_path, tier_num, max_v):
         assert ext_c.value == 16, f"Expected count 16, got {ext_c.value}"
         expected_ext_p = segno.encoder.calc_structured_append_parity(ext_text.decode("latin1"))
         assert ext_p.value == expected_ext_p, f"Parity mismatch for N=16: {ext_p.value} vs {expected_ext_p}"
+
+    # --- SVG and PNG Rendering Verification (Increment 17) ---
+    fn_render_svg = getattr(lib, f"{prefix}_render_svg")
+    fn_render_svg.argtypes = [
+        ctypes.POINTER(ZqrMatrix),
+        ctypes.POINTER(ZqrRenderOptions),
+        ctypes.c_char_p,
+        ctypes.c_size_t,
+        ctypes.POINTER(ctypes.c_size_t),
+    ]
+    fn_render_svg.restype = ctypes.c_int
+
+    fn_render_png = getattr(lib, f"{prefix}_render_png")
+    fn_render_png.argtypes = [
+        ctypes.POINTER(ZqrMatrix),
+        ctypes.POINTER(ZqrRenderOptions),
+        ctypes.POINTER(ctypes.c_uint8),
+        ctypes.c_size_t,
+        ctypes.POINTER(ctypes.c_size_t),
+    ]
+    fn_render_png.restype = ctypes.c_int
+
+    ropts = ZqrRenderOptions(
+        quiet_zone=4,
+        scale=8,
+        reserved=(ctypes.c_uint8 * 2)(),
+        foreground=0x000000FF,
+        background=0xFFFFFFFF,
+    )
+
+    # 1. SVG Rendering Tests
+    # 1.1 Dry-run
+    svg_len = ctypes.c_size_t(0)
+    rc_svg_dry = fn_render_svg(ctypes.byref(out), ctypes.byref(ropts), None, 0, ctypes.byref(svg_len))
+    assert rc_svg_dry == 0, f"SVG dry run failed: {rc_svg_dry}"
+    assert svg_len.value > 100
+
+    # 1.2 Buffer too small
+    small_svg = (ctypes.c_char * 16)()
+    written_len = ctypes.c_size_t(0)
+    rc_svg_small = fn_render_svg(ctypes.byref(out), ctypes.byref(ropts), small_svg, 16, ctypes.byref(written_len))
+    assert rc_svg_small == -6, f"Expected -6 for SVG small buffer, got {rc_svg_small}"
+
+    # 1.3 Full SVG generation
+    svg_buf = (ctypes.c_char * svg_len.value)()
+    rc_svg_full = fn_render_svg(ctypes.byref(out), ctypes.byref(ropts), svg_buf, svg_len.value, ctypes.byref(written_len))
+    assert rc_svg_full == 0, f"Full SVG render failed: {rc_svg_full}"
+    assert written_len.value == svg_len.value
+    svg_text = svg_buf.raw.decode("utf-8")
+    assert svg_text.startswith("<svg")
+    assert "</svg>" in svg_text
+    expected_dim = (out.size + 2 * ropts.quiet_zone) * ropts.scale
+    assert f'viewBox="0 0 {expected_dim} {expected_dim}"' in svg_text
+
+    # 2. PNG Rendering Tests
+    # 2.1 Dry-run
+    png_bound = ctypes.c_size_t(0)
+    rc_png_dry = fn_render_png(ctypes.byref(out), ctypes.byref(ropts), None, 0, ctypes.byref(png_bound))
+    assert rc_png_dry == 0, f"PNG dry run failed: {rc_png_dry}"
+    assert png_bound.value > 500
+
+    # 2.2 Buffer too small
+    small_png = (ctypes.c_uint8 * 16)()
+    rc_png_small = fn_render_png(ctypes.byref(out), ctypes.byref(ropts), small_png, 16, ctypes.byref(written_len))
+    assert rc_png_small == -6, f"Expected -6 for PNG small buffer, got {rc_png_small}"
+
+    # 2.3 Full PNG generation
+    png_buf = (ctypes.c_uint8 * png_bound.value)()
+    rc_png_full = fn_render_png(ctypes.byref(out), ctypes.byref(ropts), png_buf, png_bound.value, ctypes.byref(written_len))
+    assert rc_png_full == 0, f"Full PNG render failed: {rc_png_full}"
+    assert written_len.value > 64
+
+    # 2.4 Verify PNG structure and PIL decode (v1: 21x21 modules, QZ 4, scale 8 = 232x232 px)
+    assert expected_dim == 232, f"Expected Version 1 dim 232, got {expected_dim}"
+    png_bytes = bytes(png_buf)[:written_len.value]
+    assert png_bytes.startswith(b"\x89PNG\r\n\x1a\n"), "PNG header signature mismatch"
+
+    img = Image.open(io.BytesIO(png_bytes))
+    assert img.format == "PNG", f"Expected PNG format, got {img.format}"
+    assert img.size == (232, 232), f"Expected Version 1 image size 232x232, got {img.size}"
+
+    # 2.5 Large QR Code (v40) PNG & SVG tests for Tier 3 (~1480x1480 px, 185x185 modules with QZ 4)
+    if tier_num == 3:
+        v40_text = b"V40-LARGE-QR-CODE-PNG-TEST-" * 40
+        v40_arr = (ctypes.c_uint8 * len(v40_text)).from_buffer_copy(v40_text)
+        v40_opts = ZqrOptions(
+            min_version=40,
+            max_version=40,
+            ecc=0,
+            mask=0,
+            kanji=0,
+            optimize=0,
+            fnc1=0,
+            fnc1_app_indicator=0,
+            reserved=(ctypes.c_uint8 * 3)(),
+            has_eci=0,
+            eci=0,
+        )
+        v40_out = ZqrMatrix()
+        rc_v40 = fn_encode_advanced(v40_arr, len(v40_text), ctypes.byref(v40_opts), buf, expected_max_buf, ctypes.byref(v40_out))
+        assert rc_v40 == 0
+        assert v40_out.version == 40
+        assert v40_out.size == 177
+
+        v40_expected_dim = (177 + 2 * ropts.quiet_zone) * ropts.scale  # (177 + 8) * 8 = 185 * 8 = 1480 px
+        assert v40_expected_dim == 1480
+
+        # v40 SVG Test
+        v40_svg_len = ctypes.c_size_t(0)
+        rc_v40_svg_dry = fn_render_svg(ctypes.byref(v40_out), ctypes.byref(ropts), None, 0, ctypes.byref(v40_svg_len))
+        assert rc_v40_svg_dry == 0
+        assert v40_svg_len.value > 1000
+
+        v40_svg_buf = (ctypes.c_char * v40_svg_len.value)()
+        v40_svg_written = ctypes.c_size_t(0)
+        rc_v40_svg = fn_render_svg(ctypes.byref(v40_out), ctypes.byref(ropts), v40_svg_buf, v40_svg_len.value, ctypes.byref(v40_svg_written))
+        assert rc_v40_svg == 0
+        assert v40_svg_written.value == v40_svg_len.value
+        v40_svg_text = v40_svg_buf.raw.decode("utf-8")
+        assert f'viewBox="0 0 {v40_expected_dim} {v40_expected_dim}"' in v40_svg_text
+        assert v40_svg_text.endswith("</svg>\n")
+
+        # v40 PNG Test
+        v40_bound = ctypes.c_size_t(0)
+        rc_v40_dry = fn_render_png(ctypes.byref(v40_out), ctypes.byref(ropts), None, 0, ctypes.byref(v40_bound))
+        assert rc_v40_dry == 0
+
+        v40_png_buf = (ctypes.c_uint8 * v40_bound.value)()
+        v40_written = ctypes.c_size_t(0)
+        rc_v40_png = fn_render_png(ctypes.byref(v40_out), ctypes.byref(ropts), v40_png_buf, v40_bound.value, ctypes.byref(v40_written))
+        assert rc_v40_png == 0
+
+        v40_bytes = bytes(v40_png_buf)[:v40_written.value]
+        v40_img = Image.open(io.BytesIO(v40_bytes))
+        assert v40_img.size == (v40_expected_dim, v40_expected_dim), f"v40 PNG size mismatch: {v40_img.size} vs {v40_expected_dim}x{v40_expected_dim}"
 
     print(f"  [OK] Functional verification passed for {so_path}")
 

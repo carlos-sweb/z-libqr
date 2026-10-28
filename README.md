@@ -1,9 +1,12 @@
 # z-libqr (libzqr)
 
-A complete, zero-dependency QR Code Model 2 encoder in Zig 0.17.
-Generates strictly compliant QR Code Model 2 matrices from Version 1 (21×21) to 40 (177×177), with error correction levels L, M, Q, H, dynamic programming multi-mode optimization, Kanji, FNC1, and Structured Append.
+A fast, complete QR Code Model 2 encoder and renderer in Zig 0.17.
+Generates strictly compliant QR Code Model 2 matrices from Version 1 (21×21) to 40 (177×177), with error correction levels L, M, Q, H, dynamic programming multi-mode optimization, Kanji, FNC1, Structured Append, and rendering to SVG and PNG.
 
-Output is strictly the module matrix (0 = light, 1 = dark), without quiet zone padding or image rendering.
+- **Core Encoder**: 100% zero-dependency, zero heap allocations.
+- **SVG Rendering**: 100% zero-dependency, scalable SVG document with horizontal run combining.
+- **PNG Rendering**: High-performance PNG image generation via `libpng`.
+- **Standalone Build**: Compiling with `-Denable-png=false` produces a pure standalone build without `libpng` or `libc`.
 
 This library is a from-scratch Zig port of the algorithm described in Project Nayuki's QR Code generator (MIT).
 
@@ -19,6 +22,7 @@ This library is a from-scratch Zig port of the algorithm described in Project Na
   - [Optimal Multi-Mode Optimizer (DP Mixing)](#optimal-multi-mode-optimizer-dp-mixing)
   - [FNC1 & GS1 QR Codes](#fnc1--gs1-qr-codes)
   - [Structured Append Sequences](#structured-append-sequences)
+- [Image Rendering (SVG & PNG)](#image-rendering-svg--png)
 - [Zig API Reference](#zig-api-reference)
 - [C ABI Reference](#c-abi-reference)
 - [Usage Examples](#usage-examples)
@@ -48,10 +52,11 @@ This library is a from-scratch Zig port of the algorithm described in Project Na
 | | FNC1 First Position | **Complete** | GS1 QR Code identification (`0101`) |
 | | FNC1 Second Position | **Complete** | AIM application indicator (`1001`) |
 | | Structured Append | **Complete** | 1 to 16 linked symbols, automatic parity checksum |
+| **Rendering** | SVG Document | **Complete** | Zero-dependency scalable vector rendering with run combining |
+| | PNG Image | **Complete** | PNG generation using `libpng` (RGBA rasterization) |
 | **Explicitly Out of Scope** | Micro QR (M1–M4) | *Out of Scope* | Standard QR Model 2 only |
 | | QR Code Model 1 | *Out of Scope* | Obsolete legacy specification |
 | | Decoder / Reader | *Out of Scope* | Encoder only; no scanning or decoding logic |
-| | Image Rendering | *Out of Scope* | Generates raw module matrices; no PNG/SVG or quiet zones |
 | | GS1 AI Syntax Validation | *Out of Scope* | Inserts FNC1 headers; semantic AI parsing is caller responsibility |
 
 ---
@@ -136,6 +141,42 @@ To minimize binary footprint and stack memory in resource-constrained or embedde
 
 ---
 
+## Image Rendering (SVG & PNG)
+
+`z-libqr` includes an isolated rendering layer supporting SVG and PNG outputs:
+
+```zig
+pub const RenderOptions = struct {
+    quiet_zone: u8 = 4,           // standard QR quiet zone margin (modules)
+    scale: u8 = 8,                // pixels per module
+    foreground: u32 = 0x000000FF, // RGBA black
+    background: u32 = 0xFFFFFFFF, // RGBA white
+};
+```
+
+### SVG Rendering (Zero-Dependency)
+- **100% Zero-Dependency**: Does not depend on `libpng`, `libc`, or external packages.
+- **Optimized Path Output**: Compact `<svg>` document combining adjacent horizontal modules into single path runs (`M...h...v...h-...z`).
+- **Deterministic Sizing**: `calcSvgLen` calculates the exact output length in bytes without allocating. `renderSvgBuffer` writes directly into a caller-provided byte slice.
+
+### PNG Rendering (libpng)
+- **Direct Rasterization**: Generates high-quality 8-bit RGBA PNG files using system `libpng`.
+- **Memory Safety**: Uses an isolated C wrapper (`c/zqr_png_wrapper.c`) with `setjmp/longjmp` and custom silent error handlers. All structures (`png_structp`, `png_infop`) are guaranteed to be cleaned up via `png_destroy_write_struct` on every return path (success, error, or buffer overflow). Zero memory leaks.
+- **Fixed-Buffer Support**: `calcPngMaxBound` calculates a worst-case byte bound. `renderPngBuffer` allows streaming or fixed-buffer rendering.
+
+### Build Configuration & Host Requirements
+- **Host Dependency**: PNG rendering requires `libpng` installed on the host system:
+  - Fedora / RHEL: `sudo dnf install libpng-devel`
+  - Debian / Ubuntu: `sudo apt install libpng-dev`
+  - macOS: `brew install libpng`
+- **Standalone Build Option**:
+  ```bash
+  zig build -Denable-png=false
+  ```
+  Produces standalone binaries without `libpng` and without `libc`. If built with `-Denable-png=false`, `render_png` returns `-9` (`ZQR_ERR_UNSUPPORTED`). Cross-compiling to Windows/macOS with PNG support requires providing `libpng` for that target. SVG rendering has no such limitation and works unconditionally.
+
+---
+
 ## Zig API Reference
 
 Available through `zqr.Tier1`, `zqr.Tier2`, or `zqr.Tier3`:
@@ -156,6 +197,15 @@ pub fn encodeSequence(module_storage: ?[]u8, data: []const u8, options: Sequence
 // Buffer length queries
 pub fn bufferLen(version: u8) Error!usize;
 pub fn sequenceBufferLen(version: u8, count: u8) Error!usize;
+
+// 5. Rendering layer (v1.3.0) via `zqr.render`:
+pub fn renderSvg(allocator: std.mem.Allocator, matrix: QrMatrix, opts: RenderOptions) ![]u8;
+pub fn renderSvgBuffer(matrix: QrMatrix, opts: RenderOptions, buf: []u8) !usize;
+pub fn calcSvgLen(matrix: QrMatrix, opts: RenderOptions) usize;
+
+pub fn renderPng(allocator: std.mem.Allocator, matrix: QrMatrix, opts: RenderOptions) ![]u8;
+pub fn renderPngBuffer(allocator: std.mem.Allocator, matrix: QrMatrix, opts: RenderOptions, buf: []u8) !usize;
+pub fn calcPngMaxBound(matrix_size: usize, opts: RenderOptions) usize;
 ```
 
 ### Key Structs
@@ -193,13 +243,20 @@ pub const SequenceResult = struct {
         return self.matrices[0..self.count];
     }
 };
+
+pub const RenderOptions = struct {
+    quiet_zone: u8 = 4,
+    scale: u8 = 8,
+    foreground: u32 = 0x000000FF,
+    background: u32 = 0xFFFFFFFF,
+};
 ```
 
 ---
 
 ## C ABI Reference
 
-Each tier exports exactly 8 public symbols (24 symbols across all tiers):
+Each tier exports exactly 10 public symbols (30 symbols across all tiers):
 
 | Symbol Pattern | Purpose |
 | :--- | :--- |
@@ -207,6 +264,8 @@ Each tier exports exactly 8 public symbols (24 symbols across all tiers):
 | `zqr_tN_encode_with_version` | Low-level encode with forced version and mask |
 | `zqr_tN_encode_advanced` | Advanced options (Kanji, DP optimizer, FNC1, ECI) |
 | `zqr_tN_encode_sequence` | Structured Append sequence encoding (1–16 symbols) |
+| `zqr_tN_render_svg` | Renders matrix to SVG string (dry-run with `buf == NULL`) |
+| `zqr_tN_render_png` | Renders matrix to PNG image file (dry-run with `buf == NULL`) |
 | `zqr_tN_buffer_len` | Required module buffer length for a single symbol |
 | `zqr_tN_sequence_buffer_len` | Required module buffer length for a sequence of symbols |
 | `zqr_tN_max_version` | Returns maximum version supported by this tier (6, 10, or 40) |
@@ -224,6 +283,7 @@ Each tier exports exactly 8 public symbols (24 symbols across all tiers):
 #define ZQR_ERR_BUFFER_TOO_SMALL        -6
 #define ZQR_ERR_NULL_POINTER            -7
 #define ZQR_ERR_INVALID_SEGMENT_ORDER   -8
+#define ZQR_ERR_UNSUPPORTED             -9  // returned by render_png if compiled with -Denable-png=false
 ```
 
 ---
@@ -343,14 +403,16 @@ print(f"Generated Version {out.version} QR ({out.size}x{out.size})")
 
 ## Quality, Testing & Verification
 
-- **Test Suite**: **73/73 tests** pass locally across Zig unit tests, C integration tests, and Python FFI verification.
+- **Test Suite**: **80/80 tests** pass locally across Zig unit tests, C integration tests, and Python FFI verification.
 - **Verification Commands**:
   ```bash
   zig build                      # Generates .a and .so libraries in zig-out/lib
   zig build test                 # Runs unit tests, golden fixtures, and C integration
   python3 tests/test_abi_so.py   # Validates FFI loading, SONAME tags, and symbol isolation
   ```
-- **ABI & Symbol Hygiene**: Every `.so` shared object is audited via `nm -D --defined-only` to guarantee exactly 8 public symbols per tier, zero cross-tier leaks, and zero sanitizer/UBSan symbols.
+- **ABI & Symbol Hygiene**: Every `.so` shared object is audited via `nm -D --defined-only` to guarantee exactly 10 public symbols per tier, zero cross-tier leaks, and zero sanitizer/UBSan symbols.
+- **Memory Safety & Leaks**: Audited under Valgrind with 100 PNG rendering iterations (interleaving successful writes and buffer overflow errors); zero bytes leaked, 100% of allocations freed (`png_destroy_write_struct` invoked on all paths).
+- **Standalone Isolation**: Audited via `ldd` and `readelf -d` with `-Denable-png=false`; produces statically linked shared libraries with zero external dependencies (no `libpng`, no `libc`).
 - **Reference Oracle Cross-Checks**:
   - Deterministic module-by-module parity verification against Project Nayuki across all 1280 (version × ECC × mask) combinations.
   - Multi-symbol bit-by-bit sequence comparison against canonical reference (Segno) with 0 module mismatches.

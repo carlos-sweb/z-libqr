@@ -23,7 +23,7 @@ extern "C" {
 
 /* Library version */
 #define ZQR_VERSION_MAJOR 1
-#define ZQR_VERSION_MINOR 2
+#define ZQR_VERSION_MINOR 3
 #define ZQR_VERSION_PATCH 0
 
 /* Error correction levels (matches enum qrcodegen_Ecc in nayuki/QR-Code-generator) */
@@ -57,6 +57,7 @@ extern "C" {
 #define ZQR_ERR_BUFFER_TOO_SMALL -6
 #define ZQR_ERR_NULL_POINTER     -7
 #define ZQR_ERR_INVALID_SEGMENT_ORDER -8
+#define ZQR_ERR_UNSUPPORTED      -9 /* Feature disabled at compile-time (e.g. render_png with -Denable-png=false) */
 
 /*
  * QR Symbol output description.
@@ -109,6 +110,17 @@ typedef struct zqr_sequence_options {
     int symbol_count; /* 0 = auto (1..16), 1..16 = forced symbol count */
 } zqr_sequence_options;
 
+/*
+ * Render options for SVG and PNG rendering (Increment 17).
+ */
+typedef struct zqr_render_options {
+    uint8_t quiet_zone;   /* Standard QR quiet zone is 4 modules */
+    uint8_t scale;        /* Pixels per module (default 8) */
+    uint8_t reserved[2];  /* Explicit padding */
+    uint32_t foreground;  /* RGBA (e.g. 0x000000FF = opaque black) */
+    uint32_t background;  /* RGBA (e.g. 0xFFFFFFFF = opaque white) */
+} zqr_render_options;
+
 /* Macro to declare prototypes for a given tier prefix */
 #define ZQR_DECLARE_TIER_PROTOTYPES(prefix) \
     int prefix##_encode( \
@@ -126,6 +138,14 @@ typedef struct zqr_sequence_options {
         uint8_t *buf, size_t buf_len, \
         zqr_matrix *out, size_t out_capacity, \
         size_t *out_count, uint8_t *out_parity); \
+    int prefix##_render_svg( \
+        const zqr_matrix *matrix, \
+        const zqr_render_options *options, \
+        char *buf, size_t buf_len, size_t *out_len); \
+    int prefix##_render_png( \
+        const zqr_matrix *matrix, \
+        const zqr_render_options *options, \
+        uint8_t *buf, size_t buf_len, size_t *out_len); \
     size_t prefix##_buffer_len(int version /* 0 = max for tier */); \
     size_t prefix##_sequence_buffer_len(int version /* 0 = max for tier */, int count /* 0 = 16 */); \
     int prefix##_max_version(void); \

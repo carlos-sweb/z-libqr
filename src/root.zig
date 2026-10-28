@@ -48,6 +48,7 @@ pub const isKanji = kanji.isKanji;
 pub const toQrKanji = kanji.toQrKanji;
 
 pub const optimizer = @import("optimizer.zig");
+pub const render = @import("render.zig");
 
 /// Predefined tiers, matching the distributed C libraries.
 pub const Tier1 = Encoder(6);
@@ -67,6 +68,7 @@ test {
     _ = interleave;
     _ = mask;
     _ = encoder;
+    _ = render;
 }
 
 test "README consumer example compiles and runs" {

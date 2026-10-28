@@ -65,6 +65,8 @@ pub const Error = error{
     BufferTooSmall,
     /// Segment order violates ISO/IEC 18004 (e.g. FNC1 after data, or ECI after FNC1).
     InvalidSegmentOrder,
+    /// Requested feature or format is not supported or was disabled at build time.
+    Unsupported,
 };
 
 /// An encoded QR symbol.

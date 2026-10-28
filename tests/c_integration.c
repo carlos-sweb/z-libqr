@@ -10,7 +10,7 @@ int main(void) {
 
     // 1. Verify Header Definitions
     assert(ZQR_VERSION_MAJOR == 1);
-    assert(ZQR_VERSION_MINOR == 2);
+    assert(ZQR_VERSION_MINOR == 3);
     assert(ZQR_VERSION_PATCH == 0);
     assert(ZQR_OK == 0);
     assert(ZQR_ERR_DATA_TOO_LONG == -1);
@@ -21,6 +21,7 @@ int main(void) {
     assert(ZQR_ERR_BUFFER_TOO_SMALL == -6);
     assert(ZQR_ERR_NULL_POINTER == -7);
     assert(ZQR_ERR_INVALID_SEGMENT_ORDER == -8);
+    assert(ZQR_ERR_UNSUPPORTED == -9);
 
     // 2. Multi-tier Simultaneous Linkage and Symbol Isolation
     // Calling functions from libzqr_t1.a, libzqr_t2.a, and libzqr_t3.a linked in the same binary.
@@ -178,6 +179,52 @@ int main(void) {
         assert(seq_matrices[i].size > 0);
         assert(seq_matrices[i].modules != NULL);
     }
+
+    // 6. SVG Rendering Validation
+    zqr_render_options ropts = {
+        .quiet_zone = 4,
+        .scale = 8,
+        .foreground = 0x000000FF,
+        .background = 0xFFFFFFFF,
+    };
+    size_t svg_len = 0;
+    rc = zqr_t1_render_svg(&m1, &ropts, NULL, 0, &svg_len);
+    assert(rc == ZQR_OK);
+    assert(svg_len > 100);
+
+    char small_svg_buf[32];
+    size_t written_len = 0;
+    rc = zqr_t1_render_svg(&m1, &ropts, small_svg_buf, sizeof(small_svg_buf), &written_len);
+    assert(rc == ZQR_ERR_BUFFER_TOO_SMALL);
+
+    char *svg_buf = (char *)malloc(svg_len);
+    assert(svg_buf != NULL);
+    rc = zqr_t1_render_svg(&m1, &ropts, svg_buf, svg_len, &written_len);
+    assert(rc == ZQR_OK);
+    assert(written_len == svg_len);
+    assert(strncmp(svg_buf, "<svg", 4) == 0);
+    assert(strstr(svg_buf, "</svg>") != NULL);
+    free(svg_buf);
+
+    // 7. PNG Rendering Validation
+    size_t png_bound = 0;
+    rc = zqr_t1_render_png(&m1, &ropts, NULL, 0, &png_bound);
+    assert(rc == ZQR_OK);
+    assert(png_bound > 500);
+
+    uint8_t small_png_buf[16];
+    rc = zqr_t1_render_png(&m1, &ropts, small_png_buf, sizeof(small_png_buf), &written_len);
+    assert(rc == ZQR_ERR_BUFFER_TOO_SMALL);
+
+    uint8_t *png_buf = (uint8_t *)malloc(png_bound);
+    assert(png_buf != NULL);
+    rc = zqr_t1_render_png(&m1, &ropts, png_buf, png_bound, &written_len);
+    assert(rc == ZQR_OK);
+    assert(written_len > 64);
+    // Verify 8-byte PNG signature: 0x89 'P' 'N' 'G' '\r' '\n' 0x1A '\n'
+    const uint8_t expected_sig[8] = { 0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n' };
+    assert(memcmp(png_buf, expected_sig, 8) == 0);
+    free(png_buf);
 
     printf("All C ABI integration assertions passed successfully.\n");
     return 0;
