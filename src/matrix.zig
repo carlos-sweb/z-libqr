@@ -184,13 +184,7 @@ pub fn drawLightFunctionModules(modules: []u8, version: u8) void {
     // Only present for version >= 7.
     // Source: nayuki/QR-Code-generator, c/qrcodegen.c, function drawLightFunctionModules.
     if (version >= 7) {
-        var rem: u32 = version;
-        var step: usize = 0;
-        while (step < 12) : (step += 1) {
-            rem = (rem << 1) ^ ((rem >> 11) * VERSION_BCH_GENERATOR);
-        }
-        var bits: u32 = (@as(u32, version) << 12) | rem;
-        std.debug.assert((bits >> 18) == 0);
+        var bits: u32 = computeVersionBits(version);
 
         var row: u8 = 0;
         while (row < 6) : (row += 1) {
@@ -206,6 +200,21 @@ pub fn drawLightFunctionModules(modules: []u8, version: u8) void {
             }
         }
     }
+}
+
+/// Computes the 18-bit version information code (6 bits version + 12 bits BCH ECC).
+/// Only valid for version >= 7.
+/// Source: nayuki/QR-Code-generator, c/qrcodegen.c, function drawLightFunctionModules.
+pub fn computeVersionBits(version: u8) u18 {
+    std.debug.assert(version >= 7 and version <= 40);
+    var rem: u32 = version;
+    var step: usize = 0;
+    while (step < 12) : (step += 1) {
+        rem = (rem << 1) ^ ((rem >> 11) * VERSION_BCH_GENERATOR);
+    }
+    const bits: u32 = (@as(u32, version) << 12) | rem;
+    std.debug.assert((bits >> 18) == 0);
+    return @intCast(bits);
 }
 
 /// Computes the 15-bit format information code (2 bits ECL + 3 bits mask + 10 bits BCH ECC, XORed with 0x5412).

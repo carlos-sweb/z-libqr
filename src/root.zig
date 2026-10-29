@@ -49,11 +49,20 @@ pub const toQrKanji = kanji.toQrKanji;
 
 pub const optimizer = @import("optimizer.zig");
 pub const render = @import("render.zig");
+pub const decoder = @import("decoder/mod.zig");
 
 /// Predefined tiers, matching the distributed C libraries.
 pub const Tier1 = Encoder(6);
 pub const Tier2 = Encoder(10);
 pub const Tier3 = Encoder(40);
+
+pub const Decoder = decoder.Decoder;
+pub const DecoderTier1 = decoder.Tier1;
+pub const DecoderTier2 = decoder.Tier2;
+pub const DecoderTier3 = decoder.Tier3;
+pub const DecodeMetadata = decoder.DecodeMetadata;
+pub const DecodeResult = decoder.DecodeResult;
+pub const decodeBufferLen = decoder.decodeBufferLen;
 
 test {
     _ = types;
@@ -69,6 +78,7 @@ test {
     _ = mask;
     _ = encoder;
     _ = render;
+    _ = decoder;
 }
 
 test "README consumer example compiles and runs" {

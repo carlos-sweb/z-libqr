@@ -61,10 +61,40 @@ pub const RenderOptions = extern struct {
     background: u32,
 };
 
+/// Mirror of `zqr_decode_result` in include/zqr.h.
+pub const DecodeResultC = extern struct {
+    bytes_written: u32,
+    version: u8,
+    ecc: u8,
+    mask: u8,
+    modes_used: u8,
+    errors_corrected_format: u8,
+    errors_corrected_version: u8,
+    errors_corrected_data: u16,
+    has_sa: u8,
+    sa_position: u8,
+    sa_total: u8,
+    sa_parity: u8,
+    has_eci: u8,
+    _pad1: [3]u8 = [_]u8{ 0, 0, 0 },
+    eci: u32,
+    has_fnc1: u8,
+    fnc1_mode: u8,
+    fnc1_app_indicator: u8,
+    _pad2: [1]u8 = [_]u8{0},
+};
+
 comptime {
     // Layout is part of the ABI: 8 bytes of header, then the pointer.
     std.debug.assert(@offsetOf(Matrix, "modules") == 8);
     std.debug.assert(@sizeOf(RenderOptions) == 12);
+    std.debug.assert(@sizeOf(DecodeResultC) == 28);
+    std.debug.assert(@offsetOf(DecodeResultC, "bytes_written") == 0);
+    std.debug.assert(@offsetOf(DecodeResultC, "version") == 4);
+    std.debug.assert(@offsetOf(DecodeResultC, "errors_corrected_data") == 10);
+    std.debug.assert(@offsetOf(DecodeResultC, "has_sa") == 12);
+    std.debug.assert(@offsetOf(DecodeResultC, "eci") == 20);
+    std.debug.assert(@offsetOf(DecodeResultC, "has_fnc1") == 24);
 }
 
 /// Stable status codes. Values never change once released; new codes get
@@ -108,6 +138,56 @@ pub const Status = enum(c_int) {
             .null_pointer => "a required pointer argument is NULL",
             .invalid_segment_order => "segment ordering violates ISO/IEC 18004 specification",
             .unsupported => "requested feature or format is not supported or was disabled at build time",
+        };
+    }
+};
+
+/// Stable decoder status codes.
+/// Mirrors the ZQR_DECODE_OK / ZQR_ERR_DECODE_* macros in include/zqr.h.
+pub const DecodeStatus = enum(c_int) {
+    ok = 0,
+    invalid_size = -20,
+    version_exceeds_tier = -21,
+    format_uncorrectable = -22,
+    version_uncorrectable = -23,
+    rs_uncorrectable = -24,
+    invalid_mode = -25,
+    invalid_payload = -26,
+    unexpected_eof = -27,
+    buffer_too_small = -28,
+    null_pointer = -29,
+
+    pub fn code(self: DecodeStatus) c_int {
+        return @backingInt(self);
+    }
+
+    pub fn fromError(err: zqr.decoder.DecodeError) DecodeStatus {
+        return switch (err) {
+            error.InvalidMatrixSize => .invalid_size,
+            error.VersionExceedsTier => .version_exceeds_tier,
+            error.FormatBitsUncorrectable => .format_uncorrectable,
+            error.VersionBitsUncorrectable => .version_uncorrectable,
+            error.ReedSolomonUncorrectable => .rs_uncorrectable,
+            error.InvalidMode => .invalid_mode,
+            error.InvalidNumericValue, error.InvalidAlphanumericValue, error.InvalidKanjiValue, error.InvalidEciAssignment => .invalid_payload,
+            error.UnexpectedEndOfStream => .unexpected_eof,
+            error.BufferTooSmall => .buffer_too_small,
+        };
+    }
+
+    pub fn message(self: DecodeStatus) [:0]const u8 {
+        return switch (self) {
+            .ok => "ok",
+            .invalid_size => "matrix size is not a valid QR Model 2 size",
+            .version_exceeds_tier => "matrix version exceeds maximum supported by this library tier",
+            .format_uncorrectable => "format information corrupted with >3 bit errors",
+            .version_uncorrectable => "version information corrupted or inconsistent with matrix size",
+            .rs_uncorrectable => "reed-solomon error correction failed (too many damaged codewords)",
+            .invalid_mode => "invalid or reserved QR segment mode indicator",
+            .invalid_payload => "invalid character or value in segment payload",
+            .unexpected_eof => "unexpected end of stream while parsing segment",
+            .buffer_too_small => "output buffer too small for decoded payload",
+            .null_pointer => "a required pointer argument is NULL",
         };
     }
 };
@@ -454,6 +534,65 @@ pub fn cWrapper(comptime max_version: u8, comptime prefix: []const u8) type {
             return "unknown status code";
         }
 
+        pub fn decode(
+            matrix_ptr: ?[*]const u8,
+            size: u8,
+            out_ptr: ?[*]u8,
+            out_len: usize,
+            result_ptr: ?*DecodeResultC,
+        ) callconv(.c) c_int {
+            if (matrix_ptr == null or out_ptr == null or result_ptr == null) {
+                return DecodeStatus.null_pointer.code();
+            }
+            const total_mods = @as(usize, size) * size;
+            const matrix_slice = matrix_ptr.?[0..total_mods];
+            const out_slice = out_ptr.?[0..out_len];
+
+            const Dec = zqr.Decoder(max_version);
+            const res = Dec.decode(matrix_slice, size, out_slice) catch |err| {
+                return DecodeStatus.fromError(err).code();
+            };
+
+            result_ptr.?.* = .{
+                .bytes_written = @intCast(res.data.len),
+                .version = res.metadata.version,
+                .ecc = @backingInt(res.metadata.ecc),
+                .mask = res.metadata.mask,
+                .modes_used = res.metadata.modes_used,
+                .errors_corrected_format = res.metadata.errors_corrected_format,
+                .errors_corrected_version = res.metadata.errors_corrected_version,
+                .errors_corrected_data = res.metadata.errors_corrected_data,
+                .has_sa = if (res.metadata.sa != null) 1 else 0,
+                .sa_position = if (res.metadata.sa) |sa| sa.position else 0,
+                .sa_total = if (res.metadata.sa) |sa| sa.total else 0,
+                .sa_parity = if (res.metadata.sa) |sa| sa.parity else 0,
+                .has_eci = if (res.metadata.eci != null) 1 else 0,
+                ._pad1 = [_]u8{ 0, 0, 0 },
+                .eci = res.metadata.eci orelse 0,
+                .has_fnc1 = if (res.metadata.fnc1_mode != null) 1 else 0,
+                .fnc1_mode = if (res.metadata.fnc1_mode) |m| @backingInt(m) else 0,
+                .fnc1_app_indicator = res.metadata.fnc1_app_indicator orelse 0,
+                ._pad2 = [_]u8{0},
+            };
+
+            return DecodeStatus.ok.code();
+        }
+
+        pub fn decodeBufferLen(version: c_int, ecc: c_int) callconv(.c) usize {
+            if (version < 1 or version > max_version) return 0;
+            if (ecc < 0 or ecc > 3) return 0;
+            const v: u8 = @intCast(version);
+            const e: zqr.Ecc = @fromBackingInt(@as(u2, @intCast(ecc)));
+            return zqr.decoder.decodeBufferLen(v, e);
+        }
+
+        pub fn decodeStrerror(code: c_int) callconv(.c) [*:0]const u8 {
+            inline for (@typeInfo(DecodeStatus).@"enum".field_values, @typeInfo(DecodeStatus).@"enum".field_names) |val, name| {
+                if (code == val) return @field(DecodeStatus, name).message().ptr;
+            }
+            return "unknown decoder status code";
+        }
+
         comptime {
             @export(&encode, .{ .name = prefix ++ "_encode" });
             @export(&encodeWithVersion, .{ .name = prefix ++ "_encode_with_version" });
@@ -461,6 +600,9 @@ pub fn cWrapper(comptime max_version: u8, comptime prefix: []const u8) type {
             @export(&encodeSequence, .{ .name = prefix ++ "_encode_sequence" });
             @export(&renderSvg, .{ .name = prefix ++ "_render_svg" });
             @export(&renderPng, .{ .name = prefix ++ "_render_png" });
+            @export(&decode, .{ .name = prefix ++ "_decode" });
+            @export(&decodeBufferLen, .{ .name = prefix ++ "_decode_buffer_len" });
+            @export(&decodeStrerror, .{ .name = prefix ++ "_decode_strerror" });
             @export(&bufferLen, .{ .name = prefix ++ "_buffer_len" });
             @export(&sequenceBufferLen, .{ .name = prefix ++ "_sequence_buffer_len" });
             @export(&maxVersion, .{ .name = prefix ++ "_max_version" });
@@ -484,6 +626,19 @@ test "status codes are stable" {
     try testing.expectEqual(@as(c_int, -5), Status.invalid_mask.code());
     try testing.expectEqual(@as(c_int, -6), Status.buffer_too_small.code());
     try testing.expectEqual(@as(c_int, -7), Status.null_pointer.code());
+
+    // Decoder status codes
+    try testing.expectEqual(@as(c_int, 0), DecodeStatus.ok.code());
+    try testing.expectEqual(@as(c_int, -20), DecodeStatus.invalid_size.code());
+    try testing.expectEqual(@as(c_int, -21), DecodeStatus.version_exceeds_tier.code());
+    try testing.expectEqual(@as(c_int, -22), DecodeStatus.format_uncorrectable.code());
+    try testing.expectEqual(@as(c_int, -23), DecodeStatus.version_uncorrectable.code());
+    try testing.expectEqual(@as(c_int, -24), DecodeStatus.rs_uncorrectable.code());
+    try testing.expectEqual(@as(c_int, -25), DecodeStatus.invalid_mode.code());
+    try testing.expectEqual(@as(c_int, -26), DecodeStatus.invalid_payload.code());
+    try testing.expectEqual(@as(c_int, -27), DecodeStatus.unexpected_eof.code());
+    try testing.expectEqual(@as(c_int, -28), DecodeStatus.buffer_too_small.code());
+    try testing.expectEqual(@as(c_int, -29), DecodeStatus.null_pointer.code());
 }
 
 test "query helpers" {
@@ -494,6 +649,14 @@ test "query helpers" {
     try testing.expectEqual(@as(usize, 0), TestApi.bufferLen(-3));
     try testing.expectEqualStrings("ok", std.mem.span(TestApi.strerror(0)));
     try testing.expectEqualStrings("unknown status code", std.mem.span(TestApi.strerror(-1000)));
+
+    // Decoder query helpers
+    try testing.expectEqual(@as(usize, 19 * 3), TestApi.decodeBufferLen(1, 0));
+    try testing.expectEqual(@as(usize, 0), TestApi.decodeBufferLen(11, 0));
+    try testing.expectEqual(@as(usize, 0), TestApi.decodeBufferLen(1, 4));
+    try testing.expectEqualStrings("ok", std.mem.span(TestApi.decodeStrerror(0)));
+    try testing.expectEqualStrings("matrix version exceeds maximum supported by this library tier", std.mem.span(TestApi.decodeStrerror(-21)));
+    try testing.expectEqualStrings("unknown decoder status code", std.mem.span(TestApi.decodeStrerror(-999)));
 }
 
 test "argument validation" {
@@ -507,6 +670,14 @@ test "argument validation" {
     try testing.expectEqual(Status.version_exceeds_tier.code(), TestApi.encodeWithVersion(data, data.len, 11, 0, -1, &buf, buf.len, &out));
     try testing.expectEqual(Status.invalid_mask.code(), TestApi.encodeWithVersion(data, data.len, 1, 0, 8, &buf, buf.len, &out));
     try testing.expectEqual(Status.buffer_too_small.code(), TestApi.encodeWithVersion(data, data.len, 2, 0, -1, &buf, 21 * 21, &out));
+    // Decode argument validation
+    var out_dec: [256]u8 = undefined;
+    var res_dec: DecodeResultC = undefined;
+    const dummy_mod: [21 * 21]u8 = @splat(0);
+    try testing.expectEqual(DecodeStatus.null_pointer.code(), TestApi.decode(null, 21, &out_dec, out_dec.len, &res_dec));
+    try testing.expectEqual(DecodeStatus.null_pointer.code(), TestApi.decode(&dummy_mod, 21, null, out_dec.len, &res_dec));
+    try testing.expectEqual(DecodeStatus.null_pointer.code(), TestApi.decode(&dummy_mod, 21, &out_dec, out_dec.len, null));
+    try testing.expectEqual(DecodeStatus.invalid_size.code(), TestApi.decode(&dummy_mod, 22, &out_dec, out_dec.len, &res_dec));
 }
 
 test "C ABI integration: tier boundary and valid matrix output" {
@@ -540,4 +711,22 @@ test "C ABI integration: tier boundary and valid matrix output" {
     for (mods_slice) |m| {
         try testing.expect(m == 0 or m == 1);
     }
+
+    // Decode roundtrip via C ABI
+    var decoded_buf: [1024]u8 = undefined;
+    var dec_res: DecodeResultC = undefined;
+
+    // T1 decode of version >= 7 matrix must reject with ZQR_ERR_DECODE_VERSION_EXCEEDS_TIER (-21)
+    const dec_t1_res = ApiT1.decode(out_t3.modules, out_t3.size, &decoded_buf, decoded_buf.len, &dec_res);
+    try testing.expectEqual(DecodeStatus.version_exceeds_tier.code(), dec_t1_res);
+
+    // T3 decode must succeed
+    const dec_t3_res = ApiT3.decode(out_t3.modules, out_t3.size, &decoded_buf, decoded_buf.len, &dec_res);
+    try testing.expectEqual(DecodeStatus.ok.code(), dec_t3_res);
+    try testing.expectEqual(long_digits.len, dec_res.bytes_written);
+    try testing.expectEqualStrings(long_digits, decoded_buf[0..dec_res.bytes_written]);
+    try testing.expectEqual(out_t3.version, dec_res.version);
+    try testing.expectEqual(out_t3.ecc, dec_res.ecc);
+    try testing.expectEqual(out_t3.mask, dec_res.mask);
+    try testing.expectEqual(@as(u8, 0x01), dec_res.modes_used); // Numeric
 }

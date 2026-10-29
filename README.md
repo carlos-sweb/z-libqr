@@ -206,6 +206,10 @@ pub fn calcSvgLen(matrix: QrMatrix, opts: RenderOptions) usize;
 pub fn renderPng(allocator: std.mem.Allocator, matrix: QrMatrix, opts: RenderOptions) ![]u8;
 pub fn renderPngBuffer(allocator: std.mem.Allocator, matrix: QrMatrix, opts: RenderOptions, buf: []u8) !usize;
 pub fn calcPngMaxBound(matrix_size: usize, opts: RenderOptions) usize;
+
+// 6. Decoder layer (v1.4.0) via `zqr.Decoder(max_version)` or `zqr.DecoderTierN`:
+pub fn decode(modules: []const u8, size: u8, out_buf: []u8) DecodeError!DecodeResult;
+pub fn bufferLen(version: u8, ecc: Ecc) DecodeError!usize;
 ```
 
 ### Key Structs

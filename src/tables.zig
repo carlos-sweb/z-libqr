@@ -14,6 +14,12 @@ const Ecc = types.Ecc;
 pub const min_version: u8 = 1;
 pub const max_version: u8 = 40;
 
+/// Maximum number of raw codewords (interleaved data + ECC) across all versions (V40 = 3706).
+pub const max_raw_codewords: usize = 3706;
+
+/// Maximum number of data codewords across all versions and ECC levels (V40-L = 2956).
+pub const max_data_codewords: usize = 2956;
+
 /// Side length in modules of a symbol of the given version (no quiet zone).
 /// Source: nayuki/QR-Code-generator, c/qrcodegen.h, macro
 /// qrcodegen_BUFFER_LEN_FOR_VERSION, which uses `n * 4 + 17` as the size.

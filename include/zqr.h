@@ -59,6 +59,19 @@ extern "C" {
 #define ZQR_ERR_INVALID_SEGMENT_ORDER -8
 #define ZQR_ERR_UNSUPPORTED      -9 /* Feature disabled at compile-time (e.g. render_png with -Denable-png=false) */
 
+/* Decoder status / error codes (Increment A5, distinct from encoder range -1..-9) */
+#define ZQR_DECODE_OK                          0
+#define ZQR_ERR_DECODE_INVALID_SIZE          -20
+#define ZQR_ERR_DECODE_VERSION_EXCEEDS_TIER  -21
+#define ZQR_ERR_DECODE_FORMAT_UNCORRECTABLE  -22
+#define ZQR_ERR_DECODE_VERSION_UNCORRECTABLE -23
+#define ZQR_ERR_DECODE_RS_UNCORRECTABLE      -24
+#define ZQR_ERR_DECODE_INVALID_MODE          -25
+#define ZQR_ERR_DECODE_INVALID_PAYLOAD       -26
+#define ZQR_ERR_DECODE_UNEXPECTED_EOF        -27
+#define ZQR_ERR_DECODE_BUFFER_TOO_SMALL      -28
+#define ZQR_ERR_DECODE_NULL_POINTER          -29
+
 /*
  * QR Symbol output description.
  * `modules` points into the caller-provided buffer passed to the encode function.
@@ -121,6 +134,34 @@ typedef struct zqr_render_options {
     uint32_t background;  /* RGBA (e.g. 0xFFFFFFFF = opaque white) */
 } zqr_render_options;
 
+/*
+ * QR Symbol decode result (Increment A5).
+ * Contains the length of decoded payload, symbol parameters, error correction metrics,
+ * and optional metadata (Structured Append, ECI, FNC1).
+ * Total size: exactly 28 bytes on both 32-bit and 64-bit systems (all fields naturally aligned).
+ */
+typedef struct zqr_decode_result {
+    uint32_t bytes_written;           /* Number of bytes written into caller's out buffer */
+    uint8_t version;                  /* QR version (1..40) */
+    uint8_t ecc;                      /* ZQR_ECC_* (0..3) */
+    uint8_t mask;                     /* Mask pattern (0..7) */
+    uint8_t modes_used;               /* Bitfield: 0x1 num, 0x2 alnum, 0x4 byte, 0x8 kanji, 0x10 eci, 0x20 fnc1, 0x40 sa */
+    uint8_t errors_corrected_format;  /* Number of format BCH bit flips corrected (0..3) */
+    uint8_t errors_corrected_version; /* Number of version BCH bit flips corrected (0..3) */
+    uint16_t errors_corrected_data;   /* Total symbol errors corrected by Reed-Solomon */
+    uint8_t has_sa;                   /* 1 if Structured Append header present, 0 otherwise */
+    uint8_t sa_position;              /* 0-indexed position (0..15) */
+    uint8_t sa_total;                 /* 0-indexed total (1..15) */
+    uint8_t sa_parity;                /* Parity checksum */
+    uint8_t has_eci;                  /* 1 if ECI segment present, 0 otherwise */
+    uint8_t _pad1[3];                 /* Alignment padding for uint32_t eci */
+    uint32_t eci;                     /* ECI assignment value (0..999999) */
+    uint8_t has_fnc1;                 /* 1 if FNC1 present, 0 otherwise */
+    uint8_t fnc1_mode;                /* ZQR_FNC1_FIRST (1) or ZQR_FNC1_SECOND (2) */
+    uint8_t fnc1_app_indicator;       /* Application Indicator (0..255) if fnc1_mode == 2 */
+    uint8_t _pad2[1];                 /* Trailing alignment padding */
+} zqr_decode_result;
+
 /* Macro to declare prototypes for a given tier prefix */
 #define ZQR_DECLARE_TIER_PROTOTYPES(prefix) \
     int prefix##_encode( \
@@ -146,6 +187,12 @@ typedef struct zqr_render_options {
         const zqr_matrix *matrix, \
         const zqr_render_options *options, \
         uint8_t *buf, size_t buf_len, size_t *out_len); \
+    int prefix##_decode( \
+        const uint8_t *matrix, uint8_t size, \
+        uint8_t *out, size_t out_len, \
+        zqr_decode_result *result); \
+    size_t prefix##_decode_buffer_len(int version, int ecc); \
+    const char *prefix##_decode_strerror(int code); \
     size_t prefix##_buffer_len(int version /* 0 = max for tier */); \
     size_t prefix##_sequence_buffer_len(int version /* 0 = max for tier */, int count /* 0 = 16 */); \
     int prefix##_max_version(void); \

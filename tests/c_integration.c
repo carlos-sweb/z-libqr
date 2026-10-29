@@ -226,6 +226,70 @@ int main(void) {
     assert(memcmp(png_buf, expected_sig, 8) == 0);
     free(png_buf);
 
+    // 8. Decoder C ABI Integration and Multi-tier Decoding
+    assert(sizeof(zqr_decode_result) == 28);
+    assert(ZQR_DECODE_OK == 0);
+    assert(ZQR_ERR_DECODE_INVALID_SIZE == -20);
+    assert(ZQR_ERR_DECODE_VERSION_EXCEEDS_TIER == -21);
+    assert(ZQR_ERR_DECODE_FORMAT_UNCORRECTABLE == -22);
+    assert(ZQR_ERR_DECODE_VERSION_UNCORRECTABLE == -23);
+    assert(ZQR_ERR_DECODE_RS_UNCORRECTABLE == -24);
+    assert(ZQR_ERR_DECODE_INVALID_MODE == -25);
+    assert(ZQR_ERR_DECODE_INVALID_PAYLOAD == -26);
+    assert(ZQR_ERR_DECODE_UNEXPECTED_EOF == -27);
+    assert(ZQR_ERR_DECODE_BUFFER_TOO_SMALL == -28);
+    assert(ZQR_ERR_DECODE_NULL_POINTER == -29);
+
+    assert(strcmp(zqr_t1_decode_strerror(ZQR_DECODE_OK), "ok") == 0);
+    assert(strcmp(zqr_t1_decode_strerror(ZQR_ERR_DECODE_VERSION_EXCEEDS_TIER), "matrix version exceeds maximum supported by this library tier") == 0);
+    assert(strcmp(zqr_t3_decode_strerror(ZQR_ERR_DECODE_RS_UNCORRECTABLE), "reed-solomon error correction failed (too many damaged codewords)") == 0);
+
+    assert(zqr_t1_decode_buffer_len(1, ZQR_ECC_LOW) == 19 * 3);
+    assert(zqr_t1_decode_buffer_len(7, ZQR_ECC_LOW) == 0); // Out of tier for t1
+    assert(zqr_t2_decode_buffer_len(10, ZQR_ECC_HIGH) == 122 * 3);
+    assert(zqr_t3_decode_buffer_len(40, ZQR_ECC_LOW) == 2956 * 3);
+
+    // End-to-end decode of fresh "HELLO WORLD" symbol
+    uint8_t hello_buf[21 * 21];
+    zqr_matrix hello_m;
+    rc = zqr_t1_encode((const uint8_t *)"HELLO WORLD", 11, ZQR_ECC_MEDIUM, hello_buf, sizeof(hello_buf), &hello_m);
+    assert(rc == ZQR_OK);
+
+    uint8_t dec_out[512];
+    zqr_decode_result dres;
+    memset(&dres, 0, sizeof(dres));
+    rc = zqr_t1_decode(hello_m.modules, hello_m.size, dec_out, sizeof(dec_out), &dres);
+    assert(rc == ZQR_DECODE_OK);
+    assert(dres.bytes_written == 11);
+    assert(memcmp(dec_out, "HELLO WORLD", 11) == 0);
+    assert(dres.version == 1);
+    assert(dres.ecc == ZQR_ECC_MEDIUM);
+    assert(dres.mask == hello_m.mask);
+    assert((dres.modes_used & 0x02) != 0); // Alphanumeric
+    assert(dres.errors_corrected_format == 0);
+    assert(dres.errors_corrected_data == 0);
+
+    // Tier boundary in decoder:
+    // m2 is version 8 (encoded with 300 digits).
+    // - T1 (max v6) must reject with ZQR_ERR_DECODE_VERSION_EXCEEDS_TIER (-21)
+    // - T2 (max v10) must decode successfully
+    rc = zqr_t1_decode(m2.modules, m2.size, dec_out, sizeof(dec_out), &dres);
+    assert(rc == ZQR_ERR_DECODE_VERSION_EXCEEDS_TIER);
+
+    rc = zqr_t2_decode(m2.modules, m2.size, dec_out, sizeof(dec_out), &dres);
+    assert(rc == ZQR_DECODE_OK);
+    assert(dres.version == 8);
+    assert(dres.bytes_written == 300);
+    assert(memcmp(dec_out, digits_300, 300) == 0);
+    assert((dres.modes_used & 0x01) != 0); // Numeric
+
+    // Decoder error handling
+    assert(zqr_t1_decode(NULL, m1.size, dec_out, sizeof(dec_out), &dres) == ZQR_ERR_DECODE_NULL_POINTER);
+    assert(zqr_t1_decode(m1.modules, m1.size, NULL, sizeof(dec_out), &dres) == ZQR_ERR_DECODE_NULL_POINTER);
+    assert(zqr_t1_decode(m1.modules, m1.size, dec_out, sizeof(dec_out), NULL) == ZQR_ERR_DECODE_NULL_POINTER);
+    assert(zqr_t1_decode(m1.modules, 22, dec_out, sizeof(dec_out), &dres) == ZQR_ERR_DECODE_INVALID_SIZE);
+    assert(zqr_t1_decode(m1.modules, m1.size, dec_out, 5, &dres) == ZQR_ERR_DECODE_BUFFER_TOO_SMALL);
+
     printf("All C ABI integration assertions passed successfully.\n");
     return 0;
 }
