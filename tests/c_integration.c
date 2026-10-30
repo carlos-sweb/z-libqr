@@ -10,7 +10,7 @@ int main(void) {
 
     // 1. Verify Header Definitions
     assert(ZQR_VERSION_MAJOR == 1);
-    assert(ZQR_VERSION_MINOR == 5);
+    assert(ZQR_VERSION_MINOR == 6);
     assert(ZQR_VERSION_PATCH == 0);
     assert(ZQR_OK == 0);
     assert(ZQR_ERR_DATA_TOO_LONG == -1);
@@ -225,6 +225,50 @@ int main(void) {
     const uint8_t expected_sig[8] = { 0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n' };
     assert(memcmp(png_buf, expected_sig, 8) == 0);
     free(png_buf);
+
+    // 7.1 Extended Rendering Options Validation (_ex vs non-_ex)
+    zqr_render_options ex_opts = {
+        .quiet_zone = 4,
+        .scale = 8,
+        .dot_shape = ZQR_SHAPE_ROUNDED,
+        .eye_shape = ZQR_SHAPE_ROUNDED,
+        .foreground = 0x123456FF,
+        .background = 0xFEDCBAFF,
+    };
+    size_t ex_svg_len = 0;
+    rc = zqr_t1_render_svg_ex(&m1, &ex_opts, NULL, 0, &ex_svg_len);
+    assert(rc == ZQR_OK);
+    char *ex_svg_buf = (char *)malloc(ex_svg_len);
+    assert(ex_svg_buf != NULL);
+    rc = zqr_t1_render_svg_ex(&m1, &ex_opts, ex_svg_buf, ex_svg_len, &written_len);
+    assert(rc == ZQR_OK);
+    assert(strstr(ex_svg_buf, "<circle") != NULL); // Eye shape rounded uses <circle
+    assert(strstr(ex_svg_buf, "stroke-linejoin=\"round\"") != NULL); // Dot shape rounded uses smooth blob stroke
+    assert(strstr(ex_svg_buf, "#123456") != NULL); // Custom foreground
+    assert(strstr(ex_svg_buf, "#FEDCBA") != NULL); // Custom background
+    free(ex_svg_buf);
+
+    // Legacy non-_ex must ignore dot_shape/eye_shape and NOT emit <circle
+    size_t legacy_svg_len = 0;
+    rc = zqr_t1_render_svg(&m1, &ex_opts, NULL, 0, &legacy_svg_len);
+    assert(rc == ZQR_OK);
+    char *legacy_svg_buf = (char *)malloc(legacy_svg_len);
+    assert(legacy_svg_buf != NULL);
+    rc = zqr_t1_render_svg(&m1, &ex_opts, legacy_svg_buf, legacy_svg_len, &written_len);
+    assert(rc == ZQR_OK);
+    assert(strstr(legacy_svg_buf, "<circle") == NULL);
+    free(legacy_svg_buf);
+
+    // Extended PNG rendering
+    size_t ex_png_bound = 0;
+    rc = zqr_t1_render_png_ex(&m1, &ex_opts, NULL, 0, &ex_png_bound);
+    assert(rc == ZQR_OK);
+    uint8_t *ex_png_buf = (uint8_t *)malloc(ex_png_bound);
+    assert(ex_png_buf != NULL);
+    rc = zqr_t1_render_png_ex(&m1, &ex_opts, ex_png_buf, ex_png_bound, &written_len);
+    assert(rc == ZQR_OK);
+    assert(memcmp(ex_png_buf, expected_sig, 8) == 0);
+    free(ex_png_buf);
 
     // 8. Decoder C ABI Integration and Multi-tier Decoding
     assert(sizeof(zqr_decode_result) == 28);
