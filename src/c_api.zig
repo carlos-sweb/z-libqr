@@ -56,7 +56,8 @@ pub const SequenceOptions = extern struct {
 pub const RenderOptions = extern struct {
     quiet_zone: u8,
     scale: u8,
-    reserved: [2]u8,
+    dot_shape: u8,
+    eye_shape: u8,
     foreground: u32,
     background: u32,
 };
@@ -449,9 +450,60 @@ pub fn cWrapper(comptime max_version: u8, comptime prefix: []const u8) type {
             const m = matrix.?;
             if (m.modules == null or m.size == 0) return Status.null_pointer.code();
 
+            // Legacy non-_ex variant forces square dots and square finders
             const ropts: zqr.render.RenderOptions = if (opts) |o| .{
                 .quiet_zone = o.quiet_zone,
                 .scale = o.scale,
+                .dot_shape = .square,
+                .eye_shape = .square,
+                .foreground = o.foreground,
+                .background = o.background,
+            } else .{};
+
+            const qr_m = zqr.QrMatrix{
+                .version = m.version,
+                .size = m.size,
+                .ecc = @fromBackingInt(@intCast(m.ecc)),
+                .mask = @truncate(m.mask),
+                .mode = @fromBackingInt(@intCast(m.mode)),
+                .modules = m.modules.?[0 .. @as(usize, m.size) * m.size],
+            };
+
+            const needed = zqr.render.calcSvgLen(qr_m, ropts);
+            if (buf == null) {
+                out_len.?.* = needed;
+                return Status.ok.code();
+            }
+
+            if (buf_len < needed) {
+                return Status.buffer_too_small.code();
+            }
+
+            const written = zqr.render.renderSvgBuffer(qr_m, ropts, buf.?[0..buf_len]) catch {
+                return Status.buffer_too_small.code();
+            };
+
+            out_len.?.* = written;
+            return Status.ok.code();
+        }
+
+        /// Renders matrix as an SVG document with extended options honoring dot_shape and eye_shape.
+        pub fn renderSvgEx(
+            matrix: ?*const Matrix,
+            opts: ?*const RenderOptions,
+            buf: ?[*]u8,
+            buf_len: usize,
+            out_len: ?*usize,
+        ) callconv(.c) c_int {
+            if (matrix == null or out_len == null) return Status.null_pointer.code();
+            const m = matrix.?;
+            if (m.modules == null or m.size == 0) return Status.null_pointer.code();
+
+            const ropts: zqr.render.RenderOptions = if (opts) |o| .{
+                .quiet_zone = o.quiet_zone,
+                .scale = o.scale,
+                .dot_shape = if (o.dot_shape == 1) .rounded else .square,
+                .eye_shape = if (o.eye_shape == 1) .rounded else .square,
                 .foreground = o.foreground,
                 .background = o.background,
             } else .{};
@@ -502,9 +554,66 @@ pub fn cWrapper(comptime max_version: u8, comptime prefix: []const u8) type {
             const m = matrix.?;
             if (m.modules == null or m.size == 0) return Status.null_pointer.code();
 
+            // Legacy non-_ex variant forces square dots and square finders
             const ropts: zqr.render.RenderOptions = if (opts) |o| .{
                 .quiet_zone = o.quiet_zone,
                 .scale = o.scale,
+                .dot_shape = .square,
+                .eye_shape = .square,
+                .foreground = o.foreground,
+                .background = o.background,
+            } else .{};
+
+            const qr_m = zqr.QrMatrix{
+                .version = m.version,
+                .size = m.size,
+                .ecc = @fromBackingInt(@intCast(m.ecc)),
+                .mask = @truncate(m.mask),
+                .mode = @fromBackingInt(@intCast(m.mode)),
+                .modules = m.modules.?[0 .. @as(usize, m.size) * m.size],
+            };
+
+            const max_bound = zqr.render.calcPngMaxBound(qr_m.size, ropts);
+            if (buf == null) {
+                out_len.?.* = max_bound;
+                return Status.ok.code();
+            }
+
+            const written = zqr.render.renderPngBuffer(std.heap.c_allocator, qr_m, ropts, buf.?[0..buf_len]) catch |err| {
+                return switch (err) {
+                    error.BufferTooSmall => Status.buffer_too_small.code(),
+                    error.NullPointer => Status.null_pointer.code(),
+                    error.Unsupported => Status.unsupported.code(),
+                    else => Status.data_too_long.code(),
+                };
+            };
+
+            out_len.?.* = written;
+            return Status.ok.code();
+        }
+
+        /// Renders matrix as a PNG image with extended options honoring dot_shape and eye_shape.
+        pub fn renderPngEx(
+            matrix: ?*const Matrix,
+            opts: ?*const RenderOptions,
+            buf: ?[*]u8,
+            buf_len: usize,
+            out_len: ?*usize,
+        ) callconv(.c) c_int {
+            const build_options = @import("build_options");
+            if (!build_options.enable_png) {
+                return Status.unsupported.code();
+            }
+
+            if (matrix == null or out_len == null) return Status.null_pointer.code();
+            const m = matrix.?;
+            if (m.modules == null or m.size == 0) return Status.null_pointer.code();
+
+            const ropts: zqr.render.RenderOptions = if (opts) |o| .{
+                .quiet_zone = o.quiet_zone,
+                .scale = o.scale,
+                .dot_shape = if (o.dot_shape == 1) .rounded else .square,
+                .eye_shape = if (o.eye_shape == 1) .rounded else .square,
                 .foreground = o.foreground,
                 .background = o.background,
             } else .{};
@@ -684,7 +793,9 @@ pub fn cWrapper(comptime max_version: u8, comptime prefix: []const u8) type {
             @export(&encodeAdvanced, .{ .name = prefix ++ "_encode_advanced" });
             @export(&encodeSequence, .{ .name = prefix ++ "_encode_sequence" });
             @export(&renderSvg, .{ .name = prefix ++ "_render_svg" });
+            @export(&renderSvgEx, .{ .name = prefix ++ "_render_svg_ex" });
             @export(&renderPng, .{ .name = prefix ++ "_render_png" });
+            @export(&renderPngEx, .{ .name = prefix ++ "_render_png_ex" });
             @export(&decode, .{ .name = prefix ++ "_decode" });
             @export(&decodeImage, .{ .name = prefix ++ "_decode_image" });
             @export(&decodeBufferLen, .{ .name = prefix ++ "_decode_buffer_len" });

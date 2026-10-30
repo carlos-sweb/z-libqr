@@ -6,7 +6,7 @@
  *   - libzqr_t2: versions 1..10  (symbols prefixed zqr_t2_)
  *   - libzqr_t3: versions 1..40  (symbols prefixed zqr_t3_)
  *
- * Each tier exports exactly 16 public symbols. Link exactly one of
+ * Each tier exports exactly 18 public symbols. Link exactly one of
  * libzqr_t1, libzqr_t2, libzqr_t3 unless you need to dispatch across tiers
  * at runtime. The .a and .so of the same tier export identical symbols.
  *
@@ -26,7 +26,7 @@ extern "C" {
 
 /* Library version (matches build.zig.zon package version) */
 #define ZQR_VERSION_MAJOR 1
-#define ZQR_VERSION_MINOR 5
+#define ZQR_VERSION_MINOR 6
 #define ZQR_VERSION_PATCH 0
 
 /* Error correction levels (matches enum qrcodegen_Ecc in nayuki/QR-Code-generator) */
@@ -132,13 +132,23 @@ typedef struct zqr_sequence_options {
     int symbol_count; /* 0 = auto (1..16), 1..16 = forced symbol count */
 } zqr_sequence_options;
 
+/* Shape types for modules and finder patterns */
+#define ZQR_SHAPE_SQUARE  0
+#define ZQR_SHAPE_ROUNDED 1
+
 /*
  * Render options for SVG and PNG rendering.
+ *
+ * ABI note: fields dot_shape and eye_shape reuse previous reserved padding bytes.
+ * They are only honored by zqr_tN_render_svg_ex and zqr_tN_render_png_ex;
+ * the non-_ex variants (zqr_tN_render_svg / _png) always render square shapes for
+ * backward compatibility.
  */
 typedef struct zqr_render_options {
     uint8_t quiet_zone;   /* Standard QR quiet zone is 4 modules */
     uint8_t scale;        /* Pixels per module (default 8) */
-    uint8_t reserved[2];  /* Explicit padding */
+    uint8_t dot_shape;    /* ZQR_SHAPE_SQUARE (0) or ZQR_SHAPE_ROUNDED (1) */
+    uint8_t eye_shape;    /* ZQR_SHAPE_SQUARE (0) or ZQR_SHAPE_ROUNDED (1) */
     uint32_t foreground;  /* RGBA (e.g. 0x000000FF = opaque black) */
     uint32_t background;  /* RGBA (e.g. 0xFFFFFFFF = opaque white) */
 } zqr_render_options;
@@ -245,6 +255,7 @@ int zqr_t3_encode_sequence(
 
 /*
  * Render matrix as an SVG document into buf.
+ * Always renders square modules and square finders (dot_shape and eye_shape ignored).
  * Dry-run: buf == NULL returns ZQR_OK and sets *out_len to the required length.
  * matrix and out_len must be non-NULL; matrix->modules must be non-NULL.
  * Returns ZQR_OK or ZQR_ERR_BUFFER_TOO_SMALL / ZQR_ERR_NULL_POINTER.
@@ -255,11 +266,28 @@ int zqr_t3_render_svg(
     char *buf, size_t buf_len, size_t *out_len);
 
 /*
+ * Render matrix as an SVG document with extended shape options (honoring dot_shape and eye_shape).
+ */
+int zqr_t3_render_svg_ex(
+    const zqr_matrix *matrix,
+    const zqr_render_options *options,
+    char *buf, size_t buf_len, size_t *out_len);
+
+/*
  * Render matrix as a PNG image into buf (requires -Denable-png=true).
+ * Always renders square modules and square finders (dot_shape and eye_shape ignored).
  * Dry-run: buf == NULL returns ZQR_OK and sets *out_len to an upper bound.
  * If built with -Denable-png=false, returns ZQR_ERR_UNSUPPORTED (-9).
  */
 int zqr_t3_render_png(
+    const zqr_matrix *matrix,
+    const zqr_render_options *options,
+    uint8_t *buf, size_t buf_len, size_t *out_len);
+
+/*
+ * Render matrix as a PNG image with extended shape options (honoring dot_shape and eye_shape).
+ */
+int zqr_t3_render_png_ex(
     const zqr_matrix *matrix,
     const zqr_render_options *options,
     uint8_t *buf, size_t buf_len, size_t *out_len);
@@ -367,8 +395,18 @@ int zqr_t1_render_svg(
     const zqr_matrix *matrix,
     const zqr_render_options *options,
     char *buf, size_t buf_len, size_t *out_len);
+/** Same as zqr_t3_render_svg_ex; see its docs. */
+int zqr_t1_render_svg_ex(
+    const zqr_matrix *matrix,
+    const zqr_render_options *options,
+    char *buf, size_t buf_len, size_t *out_len);
 /** Same as zqr_t3_render_png; see its docs. */
 int zqr_t1_render_png(
+    const zqr_matrix *matrix,
+    const zqr_render_options *options,
+    uint8_t *buf, size_t buf_len, size_t *out_len);
+/** Same as zqr_t3_render_png_ex; see its docs. */
+int zqr_t1_render_png_ex(
     const zqr_matrix *matrix,
     const zqr_render_options *options,
     uint8_t *buf, size_t buf_len, size_t *out_len);
@@ -428,8 +466,18 @@ int zqr_t2_render_svg(
     const zqr_matrix *matrix,
     const zqr_render_options *options,
     char *buf, size_t buf_len, size_t *out_len);
+/** Same as zqr_t3_render_svg_ex; see its docs. */
+int zqr_t2_render_svg_ex(
+    const zqr_matrix *matrix,
+    const zqr_render_options *options,
+    char *buf, size_t buf_len, size_t *out_len);
 /** Same as zqr_t3_render_png; see its docs. */
 int zqr_t2_render_png(
+    const zqr_matrix *matrix,
+    const zqr_render_options *options,
+    uint8_t *buf, size_t buf_len, size_t *out_len);
+/** Same as zqr_t3_render_png_ex; see its docs. */
+int zqr_t2_render_png_ex(
     const zqr_matrix *matrix,
     const zqr_render_options *options,
     uint8_t *buf, size_t buf_len, size_t *out_len);
