@@ -157,17 +157,40 @@ Encoded (and matrix-decoded) modules are:
 ## Image Rendering (SVG & PNG)
 
 ```zig
+pub const Shape = enum(u8) {
+    square = 0,
+    rounded = 1,
+};
+
 pub const RenderOptions = struct {
     quiet_zone: u8 = 4,
     scale: u8 = 8,
+    dot_shape: Shape = .square,
+    eye_shape: Shape = .square,
     foreground: u32 = 0x000000FF,
     background: u32 = 0xFFFFFFFF,
 };
 ```
 
+### Rendering Options Reference
+
+| Option | Values | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `quiet_zone` | `0..255` | `4` | Quiet zone margin around symbol (in modules). |
+| `scale` | `1..255` | `8` | Pixels per module. |
+| `dot_shape` | `square`, `rounded` | `square` | Data modules shape. `rounded` renders smooth connected blobs with rounded corners. |
+| `eye_shape` | `square`, `rounded` | `square` | 3 corner finder patterns shape. `rounded` renders 1:1:3:1:1 concentric circles. |
+| `foreground` | `#RRGGBB[AA]` / `u32` | `0x000000FF` | Foreground color (RGBA). |
+| `background` | `#RRGGBB[AA]` / `u32` | `0xFFFFFFFF` | Background color (RGBA). |
+
+> [!NOTE]
+> Alignment patterns (for Version $\ge 2$) remain square and are not affected by `eye_shape` (only the 3 corner finders are changed).
+
 ### SVG (zero-dependency)
 
 - `calcSvgLen` / `renderSvgBuffer` / `renderSvg` via `zqr.render`.
+- Produces clean vector paths with subpath consolidation.
+- When `dot_shape = .rounded`, uses continuous smooth path outlines with rounded corners; when `eye_shape = .rounded`, generates concentric circles with exact 1:1:3:1:1 proportions.
 
 ### PNG (optional libpng)
 
@@ -176,6 +199,7 @@ pub const RenderOptions = struct {
   - Debian / Ubuntu: `sudo apt install libpng-dev`
   - macOS: `brew install libpng`
 - With `-Denable-png=false`, `render_png` returns `-9` (`ZQR_ERR_UNSUPPORTED`).
+- Smooth blob shapes and circular finder patterns use $2 \times 2$ supersampling anti-aliasing with alpha blending against background color.
 - Implemented via an isolated C wrapper (`c/zqr_png_wrapper.c`) and `extern "c" fn zqr_png_write` — the Zig sources never use `@cImport`.
 
 ---
