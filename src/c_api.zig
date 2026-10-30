@@ -156,6 +156,9 @@ pub const DecodeStatus = enum(c_int) {
     unexpected_eof = -27,
     buffer_too_small = -28,
     null_pointer = -29,
+    image_too_large = -30,
+    no_finders = -31,
+    invalid_image = -32,
 
     pub fn code(self: DecodeStatus) c_int {
         return @backingInt(self);
@@ -163,6 +166,23 @@ pub const DecodeStatus = enum(c_int) {
 
     pub fn fromError(err: zqr.decoder.DecodeError) DecodeStatus {
         return switch (err) {
+            error.InvalidMatrixSize => .invalid_size,
+            error.VersionExceedsTier => .version_exceeds_tier,
+            error.FormatBitsUncorrectable => .format_uncorrectable,
+            error.VersionBitsUncorrectable => .version_uncorrectable,
+            error.ReedSolomonUncorrectable => .rs_uncorrectable,
+            error.InvalidMode => .invalid_mode,
+            error.InvalidNumericValue, error.InvalidAlphanumericValue, error.InvalidKanjiValue, error.InvalidEciAssignment => .invalid_payload,
+            error.UnexpectedEndOfStream => .unexpected_eof,
+            error.BufferTooSmall => .buffer_too_small,
+        };
+    }
+
+    pub fn fromImageError(err: zqr.ImageDecodeError) DecodeStatus {
+        return switch (err) {
+            error.ImageTooLarge => .image_too_large,
+            error.NoFinderPatterns => .no_finders,
+            error.InvalidVersion, error.DegenerateTransform => .invalid_image,
             error.InvalidMatrixSize => .invalid_size,
             error.VersionExceedsTier => .version_exceeds_tier,
             error.FormatBitsUncorrectable => .format_uncorrectable,
@@ -188,6 +208,9 @@ pub const DecodeStatus = enum(c_int) {
             .unexpected_eof => "unexpected end of stream while parsing segment",
             .buffer_too_small => "output buffer too small for decoded payload",
             .null_pointer => "a required pointer argument is NULL",
+            .image_too_large => "image dimensions exceed maximum supported pixel count (16.8 MP)",
+            .no_finders => "no valid QR finder pattern triad detected in image",
+            .invalid_image => "degenerate geometry or invalid transformation while sampling image",
         };
     }
 };
@@ -593,6 +616,68 @@ pub fn cWrapper(comptime max_version: u8, comptime prefix: []const u8) type {
             return "unknown decoder status code";
         }
 
+        pub fn decodeImage(
+            pixels_ptr: ?[*]const u8,
+            width: usize,
+            height: usize,
+            scratch_ptr: ?[*]u8,
+            scratch_len: usize,
+            out_ptr: ?[*]u8,
+            out_len: usize,
+            result_ptr: ?*DecodeResultC,
+        ) callconv(.c) c_int {
+            if (pixels_ptr == null or scratch_ptr == null or out_ptr == null) {
+                return DecodeStatus.null_pointer.code();
+            }
+            if (width * height > zqr.decoder.image.binarize.max_pixel_count) {
+                return DecodeStatus.image_too_large.code();
+            }
+            const total_px = width * height;
+            const pixels_slice = pixels_ptr.?[0..total_px];
+            const scratch_slice = scratch_ptr.?[0..scratch_len];
+            const out_slice = out_ptr.?[0..out_len];
+
+            const Dec = zqr.Decoder(max_version);
+            const res = Dec.decodeImage(pixels_slice, width, height, scratch_slice, out_slice) catch |err| {
+                return DecodeStatus.fromImageError(err).code();
+            };
+
+            if (result_ptr) |rp| {
+                rp.* = .{
+                    .bytes_written = @intCast(res.data.len),
+                    .version = res.metadata.version,
+                    .ecc = @backingInt(res.metadata.ecc),
+                    .mask = res.metadata.mask,
+                    .modes_used = res.metadata.modes_used,
+                    .errors_corrected_format = res.metadata.errors_corrected_format,
+                    .errors_corrected_version = res.metadata.errors_corrected_version,
+                    .errors_corrected_data = res.metadata.errors_corrected_data,
+                    .has_sa = if (res.metadata.sa != null) 1 else 0,
+                    .sa_position = if (res.metadata.sa) |sa| sa.position else 0,
+                    .sa_total = if (res.metadata.sa) |sa| sa.total else 0,
+                    .sa_parity = if (res.metadata.sa) |sa| sa.parity else 0,
+                    .has_eci = if (res.metadata.eci != null) 1 else 0,
+                    ._pad1 = [_]u8{ 0, 0, 0 },
+                    .eci = res.metadata.eci orelse 0,
+                    .has_fnc1 = if (res.metadata.fnc1_mode != null) 1 else 0,
+                    .fnc1_mode = if (res.metadata.fnc1_mode) |m| @backingInt(m) else 0,
+                    .fnc1_app_indicator = res.metadata.fnc1_app_indicator orelse 0,
+                    ._pad2 = [_]u8{0},
+                };
+            }
+
+            return DecodeStatus.ok.code();
+        }
+
+        pub fn imageBufferLen(width: usize, height: usize) callconv(.c) usize {
+            if (width * height > zqr.decoder.image.binarize.max_pixel_count) return 0;
+            return zqr.imageBufferLen(width, height);
+        }
+
+        pub fn decodeImageStrerror(code: c_int) callconv(.c) [*:0]const u8 {
+            return decodeStrerror(code);
+        }
+
         comptime {
             @export(&encode, .{ .name = prefix ++ "_encode" });
             @export(&encodeWithVersion, .{ .name = prefix ++ "_encode_with_version" });
@@ -601,8 +686,11 @@ pub fn cWrapper(comptime max_version: u8, comptime prefix: []const u8) type {
             @export(&renderSvg, .{ .name = prefix ++ "_render_svg" });
             @export(&renderPng, .{ .name = prefix ++ "_render_png" });
             @export(&decode, .{ .name = prefix ++ "_decode" });
+            @export(&decodeImage, .{ .name = prefix ++ "_decode_image" });
             @export(&decodeBufferLen, .{ .name = prefix ++ "_decode_buffer_len" });
+            @export(&imageBufferLen, .{ .name = prefix ++ "_image_buffer_len" });
             @export(&decodeStrerror, .{ .name = prefix ++ "_decode_strerror" });
+            @export(&decodeImageStrerror, .{ .name = prefix ++ "_decode_image_strerror" });
             @export(&bufferLen, .{ .name = prefix ++ "_buffer_len" });
             @export(&sequenceBufferLen, .{ .name = prefix ++ "_sequence_buffer_len" });
             @export(&maxVersion, .{ .name = prefix ++ "_max_version" });
@@ -657,6 +745,12 @@ test "query helpers" {
     try testing.expectEqualStrings("ok", std.mem.span(TestApi.decodeStrerror(0)));
     try testing.expectEqualStrings("matrix version exceeds maximum supported by this library tier", std.mem.span(TestApi.decodeStrerror(-21)));
     try testing.expectEqualStrings("unknown decoder status code", std.mem.span(TestApi.decodeStrerror(-999)));
+
+    // Image decoder query helpers
+    try testing.expectEqual(@as(usize, 100 * 100 * 5 + 3), TestApi.imageBufferLen(100, 100));
+    try testing.expectEqualStrings("image dimensions exceed maximum supported pixel count (16.8 MP)", std.mem.span(TestApi.decodeImageStrerror(-30)));
+    try testing.expectEqualStrings("no valid QR finder pattern triad detected in image", std.mem.span(TestApi.decodeImageStrerror(-31)));
+    try testing.expectEqualStrings("degenerate geometry or invalid transformation while sampling image", std.mem.span(TestApi.decodeImageStrerror(-32)));
 }
 
 test "argument validation" {
@@ -678,6 +772,13 @@ test "argument validation" {
     try testing.expectEqual(DecodeStatus.null_pointer.code(), TestApi.decode(&dummy_mod, 21, null, out_dec.len, &res_dec));
     try testing.expectEqual(DecodeStatus.null_pointer.code(), TestApi.decode(&dummy_mod, 21, &out_dec, out_dec.len, null));
     try testing.expectEqual(DecodeStatus.invalid_size.code(), TestApi.decode(&dummy_mod, 22, &out_dec, out_dec.len, &res_dec));
+
+    // Decode image argument validation
+    var dummy_scratch: [100]u8 = undefined;
+    try testing.expectEqual(DecodeStatus.null_pointer.code(), TestApi.decodeImage(null, 10, 10, &dummy_scratch, dummy_scratch.len, &out_dec, out_dec.len, &res_dec));
+    try testing.expectEqual(DecodeStatus.null_pointer.code(), TestApi.decodeImage(&dummy_scratch, 10, 10, null, dummy_scratch.len, &out_dec, out_dec.len, &res_dec));
+    try testing.expectEqual(DecodeStatus.null_pointer.code(), TestApi.decodeImage(&dummy_scratch, 10, 10, &dummy_scratch, dummy_scratch.len, null, out_dec.len, &res_dec));
+    try testing.expectEqual(DecodeStatus.image_too_large.code(), TestApi.decodeImage(&dummy_scratch, 5000, 4000, &dummy_scratch, dummy_scratch.len, &out_dec, out_dec.len, &res_dec));
 }
 
 test "C ABI integration: tier boundary and valid matrix output" {

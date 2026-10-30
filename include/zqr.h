@@ -72,6 +72,11 @@ extern "C" {
 #define ZQR_ERR_DECODE_BUFFER_TOO_SMALL      -28
 #define ZQR_ERR_DECODE_NULL_POINTER          -29
 
+/* Image decoder status / error codes (Increment B6, range -30..-39) */
+#define ZQR_ERR_DECODE_IMAGE_TOO_LARGE       -30
+#define ZQR_ERR_DECODE_NO_FINDERS            -31
+#define ZQR_ERR_DECODE_INVALID_IMAGE         -32
+
 /*
  * QR Symbol output description.
  * `modules` points into the caller-provided buffer passed to the encode function.
@@ -191,8 +196,15 @@ typedef struct zqr_decode_result {
         const uint8_t *matrix, uint8_t size, \
         uint8_t *out, size_t out_len, \
         zqr_decode_result *result); \
+    int prefix##_decode_image( \
+        const uint8_t *pixels, size_t width, size_t height, \
+        uint8_t *scratch, size_t scratch_len, \
+        uint8_t *out, size_t out_len, \
+        zqr_decode_result *result); \
     size_t prefix##_decode_buffer_len(int version, int ecc); \
+    size_t prefix##_image_buffer_len(size_t width, size_t height); \
     const char *prefix##_decode_strerror(int code); \
+    const char *prefix##_decode_image_strerror(int code); \
     size_t prefix##_buffer_len(int version /* 0 = max for tier */); \
     size_t prefix##_sequence_buffer_len(int version /* 0 = max for tier */, int count /* 0 = 16 */); \
     int prefix##_max_version(void); \

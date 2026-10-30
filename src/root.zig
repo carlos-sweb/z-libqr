@@ -63,6 +63,8 @@ pub const DecoderTier3 = decoder.Tier3;
 pub const DecodeMetadata = decoder.DecodeMetadata;
 pub const DecodeResult = decoder.DecodeResult;
 pub const decodeBufferLen = decoder.decodeBufferLen;
+pub const imageBufferLen = decoder.imageBufferLen;
+pub const ImageDecodeError = decoder.ImageDecodeError;
 
 test {
     _ = types;

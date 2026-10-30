@@ -239,10 +239,16 @@ int main(void) {
     assert(ZQR_ERR_DECODE_UNEXPECTED_EOF == -27);
     assert(ZQR_ERR_DECODE_BUFFER_TOO_SMALL == -28);
     assert(ZQR_ERR_DECODE_NULL_POINTER == -29);
+    assert(ZQR_ERR_DECODE_IMAGE_TOO_LARGE == -30);
+    assert(ZQR_ERR_DECODE_NO_FINDERS == -31);
+    assert(ZQR_ERR_DECODE_INVALID_IMAGE == -32);
 
     assert(strcmp(zqr_t1_decode_strerror(ZQR_DECODE_OK), "ok") == 0);
     assert(strcmp(zqr_t1_decode_strerror(ZQR_ERR_DECODE_VERSION_EXCEEDS_TIER), "matrix version exceeds maximum supported by this library tier") == 0);
     assert(strcmp(zqr_t3_decode_strerror(ZQR_ERR_DECODE_RS_UNCORRECTABLE), "reed-solomon error correction failed (too many damaged codewords)") == 0);
+    assert(strcmp(zqr_t1_decode_strerror(ZQR_ERR_DECODE_IMAGE_TOO_LARGE), "image dimensions exceed maximum supported pixel count (16.8 MP)") == 0);
+    assert(strcmp(zqr_t1_decode_image_strerror(ZQR_ERR_DECODE_NO_FINDERS), "no valid QR finder pattern triad detected in image") == 0);
+    assert(strcmp(zqr_t1_decode_image_strerror(ZQR_ERR_DECODE_INVALID_IMAGE), "degenerate geometry or invalid transformation while sampling image") == 0);
 
     assert(zqr_t1_decode_buffer_len(1, ZQR_ECC_LOW) == 19 * 3);
     assert(zqr_t1_decode_buffer_len(7, ZQR_ECC_LOW) == 0); // Out of tier for t1
@@ -289,6 +295,153 @@ int main(void) {
     assert(zqr_t1_decode(m1.modules, m1.size, dec_out, sizeof(dec_out), NULL) == ZQR_ERR_DECODE_NULL_POINTER);
     assert(zqr_t1_decode(m1.modules, 22, dec_out, sizeof(dec_out), &dres) == ZQR_ERR_DECODE_INVALID_SIZE);
     assert(zqr_t1_decode(m1.modules, m1.size, dec_out, 5, &dres) == ZQR_ERR_DECODE_BUFFER_TOO_SMALL);
+
+    // 9. Image Decoder C ABI Integration (Increment B6)
+    // Helper lambda / block to rasterize and decode across tiers
+
+    // A. Tier 1 Image Decode (V1-M "HELLO WORLD")
+    {
+        size_t scale = 4;
+        size_t qz = 4;
+        size_t dim = (hello_m.size + 2 * qz) * scale;
+        uint8_t *px = (uint8_t *)malloc(dim * dim);
+        assert(px != NULL);
+        memset(px, 255, dim * dim);
+        for (size_t r = 0; r < hello_m.size; r++) {
+            for (size_t c = 0; c < hello_m.size; c++) {
+                if (hello_m.modules[r * hello_m.size + c] == 1) {
+                    size_t py = (qz + r) * scale;
+                    size_t px_c = (qz + c) * scale;
+                    for (size_t dy = 0; dy < scale; dy++) {
+                        for (size_t dx = 0; dx < scale; dx++) {
+                            px[(py + dy) * dim + (px_c + dx)] = 0;
+                        }
+                    }
+                }
+            }
+        }
+
+        size_t req_scratch = zqr_t1_image_buffer_len(dim, dim);
+        assert(req_scratch == dim * dim * 5 + 3);
+        uint8_t *scratch = (uint8_t *)malloc(req_scratch);
+        assert(scratch != NULL);
+
+        memset(&dres, 0, sizeof(dres));
+        rc = zqr_t1_decode_image(px, dim, dim, scratch, req_scratch, dec_out, sizeof(dec_out), &dres);
+        assert(rc == ZQR_DECODE_OK);
+        assert(dres.version == 1);
+        assert(dres.bytes_written == 11);
+        assert(memcmp(dec_out, "HELLO WORLD", 11) == 0);
+
+        // Null pointer checks
+        assert(zqr_t1_decode_image(NULL, dim, dim, scratch, req_scratch, dec_out, sizeof(dec_out), &dres) == ZQR_ERR_DECODE_NULL_POINTER);
+        assert(zqr_t1_decode_image(px, dim, dim, NULL, req_scratch, dec_out, sizeof(dec_out), &dres) == ZQR_ERR_DECODE_NULL_POINTER);
+        assert(zqr_t1_decode_image(px, dim, dim, scratch, req_scratch, NULL, sizeof(dec_out), &dres) == ZQR_ERR_DECODE_NULL_POINTER);
+
+        // ImageTooLarge check
+        assert(zqr_t1_decode_image(px, 5000, 4000, scratch, req_scratch, dec_out, sizeof(dec_out), &dres) == ZQR_ERR_DECODE_IMAGE_TOO_LARGE);
+
+        free(scratch);
+        free(px);
+    }
+
+    // B. Tier 2 Image Decode (V8-M with 300 numeric digits)
+    {
+        size_t scale = 3;
+        size_t qz = 4;
+        size_t dim = (m2.size + 2 * qz) * scale;
+        uint8_t *px = (uint8_t *)malloc(dim * dim);
+        assert(px != NULL);
+        memset(px, 255, dim * dim);
+        for (size_t r = 0; r < m2.size; r++) {
+            for (size_t c = 0; c < m2.size; c++) {
+                if (m2.modules[r * m2.size + c] == 1) {
+                    size_t py = (qz + r) * scale;
+                    size_t px_c = (qz + c) * scale;
+                    for (size_t dy = 0; dy < scale; dy++) {
+                        for (size_t dx = 0; dx < scale; dx++) {
+                            px[(py + dy) * dim + (px_c + dx)] = 0;
+                        }
+                    }
+                }
+            }
+        }
+
+        size_t req_scratch = zqr_t2_image_buffer_len(dim, dim);
+        uint8_t *scratch = (uint8_t *)malloc(req_scratch);
+        assert(scratch != NULL);
+
+        // T1 must reject version 8 with ZQR_ERR_DECODE_VERSION_EXCEEDS_TIER (-21)
+        rc = zqr_t1_decode_image(px, dim, dim, scratch, req_scratch, dec_out, sizeof(dec_out), &dres);
+        assert(rc == ZQR_ERR_DECODE_VERSION_EXCEEDS_TIER);
+
+        // T2 must decode successfully
+        memset(&dres, 0, sizeof(dres));
+        rc = zqr_t2_decode_image(px, dim, dim, scratch, req_scratch, dec_out, sizeof(dec_out), &dres);
+        assert(rc == ZQR_DECODE_OK);
+        assert(dres.version == 8);
+        assert(dres.bytes_written == 300);
+        assert(memcmp(dec_out, digits_300, 300) == 0);
+
+        free(scratch);
+        free(px);
+    }
+
+    // C. Tier 3 Image Decode (V40-M with forced version)
+    {
+        uint8_t buf_v40[177 * 177];
+        zqr_matrix m40;
+        const char *v40_text = "ZQR TIER 3 VERSION 40 C ABI IMAGE DECODER TEST";
+        rc = zqr_t3_encode_with_version((const uint8_t *)v40_text, strlen(v40_text), 40, ZQR_ECC_MEDIUM, 0, buf_v40, sizeof(buf_v40), &m40);
+        assert(rc == ZQR_OK);
+        assert(m40.version == 40);
+
+        size_t scale = 2;
+        size_t qz = 4;
+        size_t dim = (m40.size + 2 * qz) * scale; // (177 + 8) * 2 = 370
+        uint8_t *px = (uint8_t *)malloc(dim * dim);
+        assert(px != NULL);
+        memset(px, 255, dim * dim);
+        for (size_t r = 0; r < m40.size; r++) {
+            for (size_t c = 0; c < m40.size; c++) {
+                if (m40.modules[r * m40.size + c] == 1) {
+                    size_t py = (qz + r) * scale;
+                    size_t px_c = (qz + c) * scale;
+                    for (size_t dy = 0; dy < scale; dy++) {
+                        for (size_t dx = 0; dx < scale; dx++) {
+                            px[(py + dy) * dim + (px_c + dx)] = 0;
+                        }
+                    }
+                }
+            }
+        }
+
+        size_t req_scratch = zqr_t3_image_buffer_len(dim, dim);
+        uint8_t *scratch = (uint8_t *)malloc(req_scratch);
+        assert(scratch != NULL);
+
+        uint8_t v40_out[1024];
+        memset(&dres, 0, sizeof(dres));
+        rc = zqr_t3_decode_image(px, dim, dim, scratch, req_scratch, v40_out, sizeof(v40_out), &dres);
+        assert(rc == ZQR_DECODE_OK);
+        assert(dres.version == 40);
+        assert(dres.bytes_written == strlen(v40_text));
+        assert(memcmp(v40_out, v40_text, strlen(v40_text)) == 0);
+
+        // Verification of image_buffer_len overflow protection (> 16.8 MP returns 0)
+        assert(zqr_t1_image_buffer_len(5000, 5000) == 0);
+        assert(zqr_t2_image_buffer_len(5000, 5000) == 0);
+        assert(zqr_t3_image_buffer_len(5000, 5000) == 0);
+
+        // Verification of strerror coverage (-20..-32 unified)
+        assert(strcmp(zqr_t1_decode_strerror(-21), zqr_t1_decode_image_strerror(-21)) == 0);
+        assert(strcmp(zqr_t1_decode_strerror(-30), "image dimensions exceed maximum supported pixel count (16.8 MP)") == 0);
+        assert(strcmp(zqr_t1_decode_image_strerror(-31), "no valid QR finder pattern triad detected in image") == 0);
+        assert(strcmp(zqr_t1_decode_image_strerror(-32), "degenerate geometry or invalid transformation while sampling image") == 0);
+
+        free(scratch);
+        free(px);
+    }
 
     printf("All C ABI integration assertions passed successfully.\n");
     return 0;

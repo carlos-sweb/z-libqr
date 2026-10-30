@@ -12,6 +12,7 @@ pub const bit_reader = @import("bit_reader.zig");
 pub const zigzag = @import("zigzag.zig");
 pub const deinterleave = @import("deinterleave.zig");
 pub const parser = @import("parser.zig");
+pub const image = @import("image/mod.zig");
 
 pub const Ecc = types.Ecc;
 pub const Fnc1Mode = types.Fnc1Mode;
@@ -50,6 +51,32 @@ pub const DecodeError = error{
     InvalidEciAssignment,
     BufferTooSmall,
 };
+
+pub const ImageDecodeError = error{
+    ImageTooLarge,
+    NoFinderPatterns,
+    InvalidVersion,
+    DegenerateTransform,
+    InvalidMatrixSize,
+    VersionExceedsTier,
+    FormatBitsUncorrectable,
+    VersionBitsUncorrectable,
+    ReedSolomonUncorrectable,
+    UnexpectedEndOfStream,
+    InvalidMode,
+    InvalidNumericValue,
+    InvalidAlphanumericValue,
+    InvalidKanjiValue,
+    InvalidEciAssignment,
+    BufferTooSmall,
+};
+
+/// Computes the required scratch buffer size in bytes for decoding an image of `width * height`.
+/// Accommodates the integral image (`width * height * 4` bytes) and the binarized bitmap
+/// (`width * height` bytes), plus 3 bytes for 4-byte memory alignment (@alignOf(u32) - 1).
+pub fn imageBufferLen(width: usize, height: usize) usize {
+    return width * height * 4 + width * height + 3;
+}
 
 /// Computes the worst-case upper bound on buffer size in bytes required to decode any valid QR symbol
 /// of `version` and `ecc`.
@@ -161,6 +188,108 @@ pub fn Decoder(comptime max_version: u8) type {
                 },
             };
         }
+
+        /// Computes the required scratch buffer size in bytes for decoding an image of `width * height`.
+        pub fn imageBufferLen(width: usize, height: usize) usize {
+            return @import("mod.zig").imageBufferLen(width, height);
+        }
+
+        /// Decodes a QR code directly from raw grayscale image pixels using caller-provided scratch buffer.
+        /// `pixels` must have length at least `width * height` (0 = dark, 255 = light).
+        /// `scratch_buf` must have length at least `imageBufferLen(width, height)`.
+        /// `out_buf` must have length at least `max_decoded_len` (or enough for the symbol's payload).
+        pub fn decodeImage(
+            pixels: []const u8,
+            width: usize,
+            height: usize,
+            scratch_buf: []u8,
+            out_buf: []u8,
+        ) ImageDecodeError!DecodeResult {
+            if (width * height > image.binarize.max_pixel_count) return error.ImageTooLarge;
+            if (pixels.len < width * height) return error.BufferTooSmall;
+            if (scratch_buf.len < @import("mod.zig").imageBufferLen(width, height)) return error.BufferTooSmall;
+            if (width == 0 or height == 0) return error.NoFinderPatterns;
+
+            const total_px = width * height;
+
+            // Align integral buffer to 4-byte boundary within scratch_buf
+            const ptr_int = @intFromPtr(scratch_buf.ptr);
+            const align_offset = (@as(usize, 4) -% (ptr_int & 3)) & 3;
+            const integral_raw = scratch_buf[align_offset .. align_offset + total_px * 4];
+            const integral_u32 = @as([]u32, @alignCast(std.mem.bytesAsSlice(u32, integral_raw)));
+
+            const bitmap_start = align_offset + total_px * 4;
+            const bitmap = scratch_buf[bitmap_start .. bitmap_start + total_px];
+
+            // 1. Adaptive binarization (Bradley-Roth with Integral Image)
+            try image.binarize.binarizeWithBuffer(pixels, width, height, bitmap, integral_u32, .{});
+
+            var last_err: ?ImageDecodeError = null;
+
+            // Try normal polarity first, then inverted polarity (negative QR: white modules on dark background)
+            var polarity: u8 = 0;
+            while (polarity < 2) : (polarity += 1) {
+                if (polarity == 1) {
+                    for (bitmap) |*b| b.* ^= 1;
+                }
+
+                const triad = image.finder.detectFinders(bitmap, width, height) catch |err| switch (err) {
+                    error.FinderPatternsNotFound, error.InvalidTriadGeometry, error.ImageTooSmall => {
+                        if (polarity == 0) continue;
+                        return last_err orelse error.NoFinderPatterns;
+                    },
+                };
+
+                // 2. Validate estimated version against tier
+                if (triad.estimated_version > tier_max_version) {
+                    return error.VersionExceedsTier;
+                }
+
+                // 3. Try normal triad orientation, and if decode fails, try mirrored orientation (swap TR and BL)
+                const orientations = [_]bool{ false, true };
+                for (orientations) |swap_tr_bl| {
+                    var cur_triad = triad;
+                    if (swap_tr_bl) {
+                        const tmp = cur_triad.top_right;
+                        cur_triad.top_right = cur_triad.bottom_left;
+                        cur_triad.bottom_left = tmp;
+                    }
+
+                    var sampled_matrix: [max_buffer_len]u8 = undefined;
+                    _ = image.sample.sampleMatrix(bitmap, width, height, cur_triad, &sampled_matrix) catch continue;
+
+                    const mat_size = cur_triad.matrix_size;
+                    const mat_len = @as(usize, mat_size) * mat_size;
+
+                    // 4. Matrix decode (BCH format/version, deinterleave, RS correction, segment parsing)
+                    if (decode(sampled_matrix[0..mat_len], mat_size, out_buf)) |res| {
+                        return res;
+                    } else |err| {
+                        if (err == error.BufferTooSmall or err == error.VersionExceedsTier) {
+                            return err;
+                        }
+                        last_err = err;
+                        continue;
+                    }
+                }
+            }
+
+            return last_err orelse error.NoFinderPatterns;
+        }
+
+        /// Convenience helper: allocates scratch buffer from `allocator` and calls `decodeImage`.
+        pub fn decodeImageAlloc(
+            allocator: std.mem.Allocator,
+            pixels: []const u8,
+            width: usize,
+            height: usize,
+            out_buf: []u8,
+        ) (ImageDecodeError || std.mem.Allocator.Error)!DecodeResult {
+            const scratch_len = @import("mod.zig").imageBufferLen(width, height);
+            const scratch = try allocator.alloc(u8, scratch_len);
+            defer allocator.free(scratch);
+            return decodeImage(pixels, width, height, scratch, out_buf);
+        }
     };
 }
 
@@ -190,6 +319,7 @@ test {
     _ = zigzag;
     _ = deinterleave;
     _ = parser;
+    _ = image;
 }
 
 test "Tier boundaries: Tier 1, Tier 2, and Tier 3 version enforcement" {
