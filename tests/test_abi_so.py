@@ -4,8 +4,8 @@ tests/test_abi_so.py - FFI, SONAME, and Symbol Isolation Verification for z-libq
 
 Verifies:
 1. Dynamic loading via dlopen/ctypes for libzqr_t1.so, libzqr_t2.so, libzqr_t3.so.
-2. ELF SONAME tag on all .so files (libzqr_tN.so.0).
-3. Symbol isolation and hygiene via nm / readelf (no leaked internal symbols or UBSan).
+2. ELF SONAME tag on all .so files (libzqr_tN.so.1).
+3. Symbol isolation and hygiene via nm / readelf (exactly 16 zqr_tN_* symbols per tier; no UBSan leaks).
 4. Functional verification across tier boundaries and error codes.
 """
 
@@ -98,7 +98,8 @@ def verify_exported_symbols(so_path, tier_prefix):
             sym = parts[2]
             exported.append(sym)
 
-    # Shipped symbols must strictly match the 10 public symbols for this tier
+    # Shipped symbols must strictly match the 16 public tier symbols (v1.5.0 ABI).
+    # Non-tier exports such as zqr_png_write (PNG wrapper) are ignored by the prefix filter.
     expected_symbols = {
         f"{tier_prefix}_encode",
         f"{tier_prefix}_encode_with_version",
@@ -106,6 +107,12 @@ def verify_exported_symbols(so_path, tier_prefix):
         f"{tier_prefix}_encode_sequence",
         f"{tier_prefix}_render_svg",
         f"{tier_prefix}_render_png",
+        f"{tier_prefix}_decode",
+        f"{tier_prefix}_decode_image",
+        f"{tier_prefix}_decode_buffer_len",
+        f"{tier_prefix}_image_buffer_len",
+        f"{tier_prefix}_decode_strerror",
+        f"{tier_prefix}_decode_image_strerror",
         f"{tier_prefix}_buffer_len",
         f"{tier_prefix}_sequence_buffer_len",
         f"{tier_prefix}_max_version",
@@ -127,7 +134,7 @@ def verify_exported_symbols(so_path, tier_prefix):
     for s in exported:
         assert not s.startswith("__ubsan"), f"Sanitizer leak: found {s} in {so_path}"
 
-    print(f"  [OK] Symbol isolation verified for {so_path}: exactly 10 symbols, 0 leaks")
+    print(f"  [OK] Symbol isolation verified for {so_path}: exactly 16 symbols, 0 leaks")
 
 
 def test_tier_functional(so_path, tier_num, max_v):
