@@ -4,6 +4,7 @@ pub const svg = @import("render_svg.zig");
 pub const png = @import("render_png.zig");
 
 pub const RenderOptions = svg.RenderOptions;
+pub const Shape = svg.Shape;
 pub const renderSvg = svg.renderSvg;
 pub const renderSvgBuffer = svg.renderSvgBuffer;
 pub const calcSvgLen = svg.calcSvgLen;
