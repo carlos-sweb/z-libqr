@@ -1,10 +1,14 @@
-//! zqr: a zero-dependency QR Code Model 2 encoder.
+//! zqr: QR Code Model 2 encoder and decoder for Zig.
 //!
-//! Output is only the module matrix (one byte per module, 0/1, no quiet
-//! zone). The core never allocates: callers provide the module buffer.
+//! Encode and decode paths are zero-dependency and never heap-allocate:
+//! callers provide module, payload, and (for image decode) scratch buffers.
+//! Optional PNG rendering links libpng when built with `-Denable-png=true`.
 //!
-//! Algorithms and tables are ported from nayuki/QR-Code-generator (MIT),
+//! Encoder algorithms and tables are ported from Project Nayuki's
+//! QR-Code-generator (MIT),
 //! https://www.nayuki.io/page/qr-code-generator-library
+//! Decoder Reed-Solomon and related vision/sampling logic are ported from
+//! quirc (ISC), https://github.com/dlbeer/quirc
 
 const types = @import("types.zig");
 const tables = @import("tables.zig");
