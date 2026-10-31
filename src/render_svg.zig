@@ -111,6 +111,14 @@ fn renderSvgInternal(matrix: QrMatrix, opts: RenderOptions, buf: ?[]u8) !usize {
     const is_blob_mode = (opts.dot_shape == .rounded);
     const is_rounded_eye = (opts.eye_shape == .rounded);
 
+    if (is_blob_mode) {
+        const std_dev = @max(0.5, f_scale * 0.20);
+        const filter_def = std.fmt.bufPrint(&tmp, "<defs>\n<filter id=\"zqr-blob\" x=\"-20%\" y=\"-20%\" width=\"140%\" height=\"140%\" color-interpolation-filters=\"sRGB\">\n<feGaussianBlur in=\"SourceGraphic\" stdDeviation=\"{d:.2}\" result=\"blur\"/>\n<feColorMatrix in=\"blur\" mode=\"matrix\" values=\"1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 25 -14\"/>\n</filter>\n</defs>\n", .{
+            std_dev,
+        }) catch return error.BufferTooSmall;
+        if (buf) |b| try writeAppend(b, &offset, filter_def) else offset += filter_def.len;
+    }
+
     // 1. Render data modules (and classic finders if eye_shape == .square)
     if (!is_blob_mode) {
         // Classic square runs
@@ -144,50 +152,67 @@ fn renderSvgInternal(matrix: QrMatrix, opts: RenderOptions, buf: ?[]u8) !usize {
         if (buf) |b| try writeAppend(b, &offset, path_close) else offset += path_close.len;
     } else {
         // Blob / smooth QR mode:
-        // Use an inner core with stroke="fg" stroke-width="2*radius" stroke-linejoin="round" stroke-linecap="round"
-        // Radius r = scale * 0.40 leaves a smooth rounded connection for adjacent modules and circular dots for single modules.
-        const r_inset = f_scale * 0.40;
-        const stroke_w = r_inset * 2.0;
-
-        const blob_open = std.fmt.bufPrint(&tmp, "<path fill=\"{s}\" stroke=\"{s}\" stroke-width=\"{d:.2}\" stroke-linejoin=\"round\" stroke-linecap=\"round\" d=\"", .{
-            fg_str, fg_str, stroke_w,
-        }) catch return error.BufferTooSmall;
-        if (buf) |b| try writeAppend(b, &offset, blob_open) else offset += blob_open.len;
+        // Render data modules (excluding finder patterns) wrapped in <g filter="url(#zqr-blob)">
+        const group_open = std.fmt.bufPrint(&tmp, "<g filter=\"url(#zqr-blob)\">\n<path fill=\"{s}\" d=\"", .{fg_str}) catch return error.BufferTooSmall;
+        if (buf) |b| try writeAppend(b, &offset, group_open) else offset += group_open.len;
 
         var y: usize = 0;
         while (y < size) : (y += 1) {
             var x: usize = 0;
             while (x < size) {
-                const in_finder = is_rounded_eye and isFinderModule(y, x, size);
+                const in_finder = isFinderModule(y, x, size);
                 if (matrix.modules[y * size + x] == 1 and !in_finder) {
                     const start_x = x;
-                    while (x < size and matrix.modules[y * size + x] == 1 and !(is_rounded_eye and isFinderModule(y, x, size))) : (x += 1) {}
+                    while (x < size and matrix.modules[y * size + x] == 1 and !isFinderModule(y, x, size)) : (x += 1) {}
                     const run_len = x - start_x;
 
-                    const px_x = @as(f64, @floatFromInt((start_x + qz) * scale)) + r_inset;
-                    const px_y = @as(f64, @floatFromInt((y + qz) * scale)) + r_inset;
-                    const px_w = @as(f64, @floatFromInt(run_len * scale)) - 2.0 * r_inset;
-                    const px_h = f_scale - 2.0 * r_inset;
+                    const px_x = (start_x + qz) * scale;
+                    const px_y = (y + qz) * scale;
+                    const px_w = run_len * scale;
+                    const px_h = scale;
 
-                    // If run_len == 1, draw a zero-length horizontal segment so round linecap creates a perfect circle!
-                    if (run_len == 1) {
-                        const cx = px_x + px_w * 0.5;
-                        const cy = px_y + px_h * 0.5;
-                        const cmd = std.fmt.bufPrint(&tmp, "M{d:.2},{d:.2}h0 ", .{ cx, cy }) catch return error.BufferTooSmall;
-                        if (buf) |b| try writeAppend(b, &offset, cmd) else offset += cmd.len;
-                    } else {
-                        // Multi-module run: horizontal rectangle inset by r_inset, puffed out by round stroke
-                        const cmd = std.fmt.bufPrint(&tmp, "M{d:.2},{d:.2}h{d:.2}v{d:.2}h-{d:.2}z ", .{ px_x, px_y, px_w, px_h, px_w }) catch return error.BufferTooSmall;
-                        if (buf) |b| try writeAppend(b, &offset, cmd) else offset += cmd.len;
-                    }
+                    const cmd = std.fmt.bufPrint(&tmp, "M{d},{d}h{d}v{d}h-{d}z ", .{ px_x, px_y, px_w, px_h, px_w }) catch return error.BufferTooSmall;
+                    if (buf) |b| try writeAppend(b, &offset, cmd) else offset += cmd.len;
                 } else {
                     x += 1;
                 }
             }
         }
 
-        const blob_close = "\"/>\n";
-        if (buf) |b| try writeAppend(b, &offset, blob_close) else offset += blob_close.len;
+        const group_close = "\"/>\n</g>\n";
+        if (buf) |b| try writeAppend(b, &offset, group_close) else offset += group_close.len;
+
+        // If eyes are square, render finder patterns outside the filter so they maintain crisp edges
+        if (!is_rounded_eye) {
+            const finder_path_open = std.fmt.bufPrint(&tmp, "<path fill=\"{s}\" d=\"", .{fg_str}) catch return error.BufferTooSmall;
+            if (buf) |b| try writeAppend(b, &offset, finder_path_open) else offset += finder_path_open.len;
+
+            y = 0;
+            while (y < size) : (y += 1) {
+                var x: usize = 0;
+                while (x < size) {
+                    const in_finder = isFinderModule(y, x, size);
+                    if (matrix.modules[y * size + x] == 1 and in_finder) {
+                        const start_x = x;
+                        while (x < size and matrix.modules[y * size + x] == 1 and isFinderModule(y, x, size)) : (x += 1) {}
+                        const run_len = x - start_x;
+
+                        const px_x = (start_x + qz) * scale;
+                        const px_y = (y + qz) * scale;
+                        const px_w = run_len * scale;
+                        const px_h = scale;
+
+                        const cmd = std.fmt.bufPrint(&tmp, "M{d},{d}h{d}v{d}h-{d}z ", .{ px_x, px_y, px_w, px_h, px_w }) catch return error.BufferTooSmall;
+                        if (buf) |b| try writeAppend(b, &offset, cmd) else offset += cmd.len;
+                    } else {
+                        x += 1;
+                    }
+                }
+            }
+
+            const finder_path_close = "\"/>\n";
+            if (buf) |b| try writeAppend(b, &offset, finder_path_close) else offset += finder_path_close.len;
+        }
     }
 
     // 2. Render rounded finders if requested
@@ -268,7 +293,7 @@ test "renderSvg default square matches golden pattern" {
     try testing.expect(std.mem.endsWith(u8, svg, "</svg>\n"));
 }
 
-test "renderSvg dot_shape = .rounded uses smooth blob stroke and rounded caps" {
+test "renderSvg dot_shape = .rounded uses smooth blob filter" {
     const mods = [_]u8{ 1, 1, 0, 1 };
     const m = QrMatrix{
         .version = 1,
@@ -285,8 +310,10 @@ test "renderSvg dot_shape = .rounded uses smooth blob stroke and rounded caps" {
     });
     defer testing.allocator.free(svg);
 
-    try testing.expect(std.mem.indexOf(u8, svg, "stroke-linejoin=\"round\"") != null);
-    try testing.expect(std.mem.indexOf(u8, svg, "stroke-linecap=\"round\"") != null);
+    try testing.expect(std.mem.indexOf(u8, svg, "<filter id=\"zqr-blob\"") != null);
+    try testing.expect(std.mem.indexOf(u8, svg, "<feGaussianBlur") != null);
+    try testing.expect(std.mem.indexOf(u8, svg, "<feColorMatrix") != null);
+    try testing.expect(std.mem.indexOf(u8, svg, "filter=\"url(#zqr-blob)\"") != null);
 }
 
 test "renderSvg eye_shape = .rounded uses 3 concentric circles per finder" {

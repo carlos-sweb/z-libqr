@@ -27,7 +27,7 @@ extern "C" {
 /* Library version (matches build.zig.zon package version) */
 #define ZQR_VERSION_MAJOR 1
 #define ZQR_VERSION_MINOR 6
-#define ZQR_VERSION_PATCH 0
+#define ZQR_VERSION_PATCH 1
 
 /* Error correction levels (matches enum qrcodegen_Ecc in nayuki/QR-Code-generator) */
 #define ZQR_ECC_LOW      0
