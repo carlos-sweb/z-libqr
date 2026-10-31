@@ -512,8 +512,8 @@ Add to your consumer `build.zig.zon` (URL + hash; not a registry package):
 ```zig
 .dependencies = .{
     .zqr = .{
-        .url = "git+https://github.com/carlos-sweb/z-libqr.git?ref=v1.6.4",
-        .hash = "z_libqr-1.6.4-P-K0qjb9CABO_ugwTSyzeHsk7kusCo1MV53Fl5Kw_y1M",
+        .url = "git+https://github.com/carlos-sweb/z-libqr.git?ref=v1.6.4#c3c4f783da4ff8296e57f914ef2518ba5c07a632",
+        .hash = "z_libqr-1.6.4-P-K0qjb9CACSCCbDxOhofu2yDRq81zYQGP_VPujVULMa",
     },
 },
 ```
