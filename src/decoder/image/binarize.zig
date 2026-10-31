@@ -40,13 +40,21 @@ pub const BinarizeError = error{
     BufferTooSmall,
 };
 
+/// Returns `width * height` if the product fits in `usize` and is ≤ `max_pixel_count`.
+/// Overflow-safe: uses `std.math.mul` so ReleaseFast cannot wrap past the limit check.
+pub fn checkedPixelCount(width: usize, height: usize) BinarizeError!usize {
+    const total = std.math.mul(usize, width, height) catch return error.ImageTooLarge;
+    if (total > max_pixel_count) return error.ImageTooLarge;
+    return total;
+}
+
 /// Computes the integral image (Summed-Area Table) for 8-bit grayscale pixels.
 /// `out_integral` must have length at least `width * height`.
 /// Maximum supported image size is 16,843,008 pixels (e.g. ~4104x4104) to prevent
 /// 32-bit unsigned overflow (since 16,843,008 * 255 = 4,294,967,040 <= u32_max).
 pub fn computeIntegralImage(pixels: []const u8, width: usize, height: usize, out_integral: []u32) BinarizeError!void {
-    if (width * height > max_pixel_count) return error.ImageTooLarge;
-    if (pixels.len < width * height or out_integral.len < width * height) return error.BufferTooSmall;
+    const total = try checkedPixelCount(width, height);
+    if (pixels.len < total or out_integral.len < total) return error.BufferTooSmall;
     if (width == 0 or height == 0) return;
 
     // First row
@@ -80,8 +88,8 @@ pub fn binarizeWithBuffer(
     integral_buf: []u32,
     options: BinarizeOptions,
 ) BinarizeError!void {
-    if (width * height > max_pixel_count) return error.ImageTooLarge;
-    if (pixels.len < width * height or out_bitmap.len < width * height or integral_buf.len < width * height) return error.BufferTooSmall;
+    const total = try checkedPixelCount(width, height);
+    if (pixels.len < total or out_bitmap.len < total or integral_buf.len < total) return error.BufferTooSmall;
     if (width == 0 or height == 0) return;
 
     try computeIntegralImage(pixels, width, height, integral_buf);
@@ -134,7 +142,8 @@ pub fn binarizeAlloc(
     out_bitmap: []u8,
     options: BinarizeOptions,
 ) !void {
-    const integral = try allocator.alloc(u32, width * height);
+    const total = try checkedPixelCount(width, height);
+    const integral = try allocator.alloc(u32, total);
     defer allocator.free(integral);
 
     try binarizeWithBuffer(pixels, width, height, out_bitmap, integral, options);

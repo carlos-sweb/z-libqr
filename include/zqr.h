@@ -27,7 +27,7 @@ extern "C" {
 /* Library version (matches build.zig.zon package version) */
 #define ZQR_VERSION_MAJOR 1
 #define ZQR_VERSION_MINOR 6
-#define ZQR_VERSION_PATCH 3
+#define ZQR_VERSION_PATCH 4
 
 /* Error correction levels (matches enum qrcodegen_Ecc in nayuki/QR-Code-generator) */
 #define ZQR_ECC_LOW      0
@@ -278,6 +278,15 @@ int zqr_t3_render_svg_ex(
  * Always renders square modules and square finders (dot_shape and eye_shape ignored).
  * Dry-run: buf == NULL returns ZQR_OK and sets *out_len to an upper bound.
  * If built with -Denable-png=false, returns ZQR_ERR_UNSUPPORTED (-9).
+ *
+ * Known limitation (stable ABI): internal PNG failures such as allocator OOM or
+ * libpng encode errors are mapped to ZQR_ERR_DATA_TOO_LONG (-1) because no
+ * dedicated status codes were reserved for them. BufferTooSmall and NullPointer
+ * still map to ZQR_ERR_BUFFER_TOO_SMALL / ZQR_ERR_NULL_POINTER.
+ *
+ * matrix->ecc and matrix->mode are trusted as coming from a prior zqr_tN_encode*
+ * call. Hand-built matrices with out-of-range enum bytes may trap in Debug /
+ * ReleaseSafe builds.
  */
 int zqr_t3_render_png(
     const zqr_matrix *matrix,
@@ -318,7 +327,8 @@ int zqr_t3_decode(
  *   - pixels, scratch, and out must be non-NULL (result may be NULL).
  *   - pixels length >= width*height.
  *   - scratch_len >= zqr_t3_image_buffer_len(width, height).
- *   - width*height must not exceed 16,843,008 (else ZQR_ERR_DECODE_IMAGE_TOO_LARGE).
+ *   - width*height must not overflow and must not exceed 16,843,008
+ *     (else ZQR_ERR_DECODE_IMAGE_TOO_LARGE). The product is checked before use.
  *
  * Selects a single best finder triad (does not iterate multiple QR codes).
  * Returns ZQR_DECODE_OK or ZQR_ERR_DECODE_* (-20..-32).
@@ -337,7 +347,8 @@ size_t zqr_t3_decode_buffer_len(int version, int ecc);
 
 /*
  * Scratch buffer length required by zqr_t3_decode_image for width*height.
- * Returns 0 if width*height exceeds the ImageTooLarge limit.
+ * Returns 0 if width*height overflows usize or exceeds the ImageTooLarge limit
+ * (16,843,008). Multiplication is overflow-checked before the limit test.
  */
 size_t zqr_t3_image_buffer_len(size_t width, size_t height);
 

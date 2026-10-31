@@ -74,8 +74,13 @@ pub const ImageDecodeError = error{
 /// Computes the required scratch buffer size in bytes for decoding an image of `width * height`.
 /// Accommodates the integral image (`width * height * 4` bytes) and the binarized bitmap
 /// (`width * height` bytes), plus 3 bytes for 4-byte memory alignment (@alignOf(u32) - 1).
+///
+/// Returns 0 if `width * height` overflows or exceeds `image.binarize.max_pixel_count`
+/// (same contract as the C `zqr_tN_image_buffer_len` helpers).
 pub fn imageBufferLen(width: usize, height: usize) usize {
-    return width * height * 4 + width * height + 3;
+    const total = image.binarize.checkedPixelCount(width, height) catch return 0;
+    const times5 = std.math.mul(usize, total, 5) catch return 0;
+    return std.math.add(usize, times5, 3) catch return 0;
 }
 
 /// Computes the worst-case upper bound on buffer size in bytes required to decode any valid QR symbol
@@ -205,12 +210,10 @@ pub fn Decoder(comptime max_version: u8) type {
             scratch_buf: []u8,
             out_buf: []u8,
         ) ImageDecodeError!DecodeResult {
-            if (width * height > image.binarize.max_pixel_count) return error.ImageTooLarge;
-            if (pixels.len < width * height) return error.BufferTooSmall;
+            const total_px = image.binarize.checkedPixelCount(width, height) catch return error.ImageTooLarge;
+            if (pixels.len < total_px) return error.BufferTooSmall;
             if (scratch_buf.len < @import("mod.zig").imageBufferLen(width, height)) return error.BufferTooSmall;
             if (width == 0 or height == 0) return error.NoFinderPatterns;
-
-            const total_px = width * height;
 
             // Align integral buffer to 4-byte boundary within scratch_buf
             const ptr_int = @intFromPtr(scratch_buf.ptr);
@@ -285,7 +288,9 @@ pub fn Decoder(comptime max_version: u8) type {
             height: usize,
             out_buf: []u8,
         ) (ImageDecodeError || std.mem.Allocator.Error)!DecodeResult {
+            // Reject oversized/overflowing dimensions before allocating (ReleaseFast-safe).
             const scratch_len = @import("mod.zig").imageBufferLen(width, height);
+            if (scratch_len == 0) return error.ImageTooLarge;
             const scratch = try allocator.alloc(u8, scratch_len);
             defer allocator.free(scratch);
             return decodeImage(pixels, width, height, scratch, out_buf);

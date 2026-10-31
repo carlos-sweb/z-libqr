@@ -83,7 +83,7 @@ To minimize binary footprint and stack memory in embedded environments, `z-libqr
 
 1. **Zig Package**: `build.zig.zon` + `@import("zqr")`. Exposes `zqr.Tier1`/`Tier2`/`Tier3` (`Encoder`) and `zqr.DecoderTier1`/`DecoderTier2`/`DecoderTier3` (`Decoder`).
 2. **Static C Libraries**: `libzqr_t1.a`, `libzqr_t2.a`, `libzqr_t3.a`.
-3. **Dynamic Shared Libraries**: `libzqr_t1.so`, `libzqr_t2.so`, `libzqr_t3.so` (package version 1.5.0, ELF SONAME `libzqr_tN.so.1`).
+3. **Dynamic Shared Libraries**: `libzqr_t1.so`, `libzqr_t2.so`, `libzqr_t3.so` (package version 1.6.4, ELF SONAME `libzqr_tN.so.1`).
 
 Build artifacts:
 
@@ -279,7 +279,7 @@ pub const DecodeMetadata = struct {
 
 ## C ABI Reference
 
-Each tier exports **exactly 16** public symbols:
+Each tier exports **exactly 18** public symbols:
 
 | Symbol Pattern | Purpose |
 | :--- | :--- |
@@ -287,8 +287,10 @@ Each tier exports **exactly 16** public symbols:
 | `zqr_tN_encode_with_version` | Forced version and mask |
 | `zqr_tN_encode_advanced` | Kanji, DP optimizer, FNC1, ECI |
 | `zqr_tN_encode_sequence` | Structured Append (1–16 symbols) |
-| `zqr_tN_render_svg` | SVG string (dry-run with `buf == NULL`) |
-| `zqr_tN_render_png` | PNG bytes (dry-run with `buf == NULL`) |
+| `zqr_tN_render_svg` | SVG string (dry-run with `buf == NULL`; square shapes) |
+| `zqr_tN_render_svg_ex` | SVG with `dot_shape` / `eye_shape` options |
+| `zqr_tN_render_png` | PNG bytes (dry-run with `buf == NULL`; square shapes) |
+| `zqr_tN_render_png_ex` | PNG with `dot_shape` / `eye_shape` options |
 | `zqr_tN_decode` | Matrix decode |
 | `zqr_tN_decode_image` | Image decode from raw grayscale pixels |
 | `zqr_tN_decode_buffer_len` | Payload buffer upper bound |
@@ -510,8 +512,8 @@ Add to your consumer `build.zig.zon` (URL + hash; not a registry package):
 ```zig
 .dependencies = .{
     .zqr = .{
-        .url = "git+https://github.com/carlos-sweb/z-libqr?ref=v1.6.3#86f7aad8db3858cf833b2aebe5fab2461deab718",
-        .hash = "z_libqr-1.6.3-P-K0quzwCADc8uelFA22CrQSRbDWdo0A6SB0ze-HiVIZ",
+        .url = "git+https://github.com/carlos-sweb/z-libqr.git?ref=v1.6.4",
+        .hash = "z_libqr-1.6.4-P-K0qjb9CABO_ugwTSyzeHsk7kusCo1MV53Fl5Kw_y1M",
     },
 },
 ```
@@ -535,10 +537,12 @@ Then `@import("zqr")` in application code. A path-based local example lives in [
 
 - **One QR per image:** `decodeImage` selects the single best right-isosceles finder triad by geometric score. It does not iterate remaining triads or return multiple payloads.
 - **Structured Append:** encode produces linked symbols; decode reports `has_sa` / `sa_position` / `sa_total` / `sa_parity` (and Zig `metadata.sa`) but does **not** concatenate the full sequence.
-- **ImageTooLarge:** images with `width * height > 16_843_008` are rejected (`error.ImageTooLarge` / `ZQR_ERR_DECODE_IMAGE_TOO_LARGE`).
+- **ImageTooLarge:** images whose `width * height` overflows or exceeds `16_843_008` are rejected (`error.ImageTooLarge` / `ZQR_ERR_DECODE_IMAGE_TOO_LARGE`). The product is overflow-checked before the limit test.
 - **ABI size:** `sizeof(zqr_decode_result) == 28` on 32-bit and 64-bit (asserted in `src/c_api.zig`).
 - **No `@cImport`:** Zig sources stay free of `@cImport`. Optional PNG uses a small C wrapper + `extern "c"`.
 - **PNG is opt-in in this library** (`-Denable-png`), separate from any CLI that may also use libpng to *load* images for decode.
+- **PNG C error mapping:** internal PNG failures (OOM, libpng encode error, invalid dimensions) from `zqr_tN_render_png*` map to `ZQR_ERR_DATA_TOO_LONG` because no dedicated codes were reserved; `BUFFER_TOO_SMALL` / `NULL_POINTER` / `UNSUPPORTED` keep their own codes. Stable ABI; will not change in 1.x.
+- **Hand-built `zqr_matrix`:** `ecc` / `mode` bytes are trusted from a prior `encode*` call. Constructing a matrix by hand with out-of-range enum values may trap in Debug / ReleaseSafe when rendering.
 
 ---
 
@@ -560,9 +564,10 @@ Then `@import("zqr")` in application code. A path-based local example lives in [
 - **v1.2.0:** Structured Append (`encodeSequence`).
 - **v1.3.0:** SVG (zero-dep) and PNG (`libpng` wrapper) rendering.
 - **v1.4.0:** Model 2 matrix decoder (Phase A) and C decode ABI; `zqr_decode_result` 28 B.
-- **v1.5.0:** Image decoder (Phase B); `decode_image` / `image_buffer_len` C symbols (16 per tier).
-- **v1.6.0:** Rendering options (custom `#RRGGBBAA` colors, `dot_shape` square/rounded, `eye_shape` square/rounded, C ABI `_ex` functions).
+- **v1.5.0:** Image decoder (Phase B); `decode_image` / `image_buffer_len` C symbols.
+- **v1.6.0:** Rendering options (custom `#RRGGBBAA` colors, `dot_shape` square/rounded, `eye_shape` square/rounded, C ABI `_ex` functions; **18** symbols per tier).
 - **v1.6.3:** SVG geometric parity with PNG SDF logic (pure cubic Bézier vector geometry, zero `<filter>`/`stroke`, 99.95% pixel parity).
+- **v1.6.4:** Fix `renderPng` error-path double-free; overflow-safe `width*height` for image decode / `image_buffer_len`; ABI docs aligned to 18 symbols.
 
 Semver: `v1.x` is backward-compatible for documented APIs; majors may break.
 
@@ -576,9 +581,9 @@ Semver: `v1.x` is backward-compatible for documented APIs; majors may break.
   zig build                      # .a and .so in zig-out/lib
   zig build test                 # unit tests, golden fixtures, C integration
   zig fmt --check build.zig build.zig.zon src tests
-  python3 tests/test_abi_so.py   # FFI load, SONAME, 16-symbol isolation per tier
+  python3 tests/test_abi_so.py   # FFI load, SONAME, 18-symbol isolation per tier
   ```
-- **ABI hygiene:** each tier `.so` exports exactly **16** `zqr_tN_*` symbols (verified by `nm` / `test_abi_so.py`).
+- **ABI hygiene:** each tier `.so` exports exactly **18** `zqr_tN_*` symbols (verified by `nm` / `test_abi_so.py`).
 - **Reference oracles:** Nayuki bit-exact encode vectors; sequence checks against reference tooling where applicable.
 - **CI:** not yet configured; suites run locally.
 

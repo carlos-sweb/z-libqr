@@ -282,7 +282,7 @@ pub fn renderPng(allocator: std.mem.Allocator, matrix: QrMatrix, opts: RenderOpt
     );
 
     if (rc != 0) {
-        allocator.free(png_buf);
+        // errdefer frees png_buf; do not free explicitly (would double-free).
         return switch (rc) {
             -6 => error.BufferTooSmall,
             -7 => error.NullPointer,

@@ -738,10 +738,9 @@ pub fn cWrapper(comptime max_version: u8, comptime prefix: []const u8) type {
             if (pixels_ptr == null or scratch_ptr == null or out_ptr == null) {
                 return DecodeStatus.null_pointer.code();
             }
-            if (width * height > zqr.decoder.image.binarize.max_pixel_count) {
+            const total_px = zqr.decoder.image.binarize.checkedPixelCount(width, height) catch {
                 return DecodeStatus.image_too_large.code();
-            }
-            const total_px = width * height;
+            };
             const pixels_slice = pixels_ptr.?[0..total_px];
             const scratch_slice = scratch_ptr.?[0..scratch_len];
             const out_slice = out_ptr.?[0..out_len];
@@ -779,7 +778,7 @@ pub fn cWrapper(comptime max_version: u8, comptime prefix: []const u8) type {
         }
 
         pub fn imageBufferLen(width: usize, height: usize) callconv(.c) usize {
-            if (width * height > zqr.decoder.image.binarize.max_pixel_count) return 0;
+            // zqr.imageBufferLen returns 0 on overflow or ImageTooLarge.
             return zqr.imageBufferLen(width, height);
         }
 
@@ -859,6 +858,9 @@ test "query helpers" {
 
     // Image decoder query helpers
     try testing.expectEqual(@as(usize, 100 * 100 * 5 + 3), TestApi.imageBufferLen(100, 100));
+    // Overflow-safe: 65536×65536 wraps on 32-bit and exceeds the limit on 64-bit; must return 0.
+    try testing.expectEqual(@as(usize, 0), TestApi.imageBufferLen(65536, 65536));
+    try testing.expectEqual(@as(usize, 0), TestApi.imageBufferLen(5000, 5000));
     try testing.expectEqualStrings("image dimensions exceed maximum supported pixel count (16.8 MP)", std.mem.span(TestApi.decodeImageStrerror(-30)));
     try testing.expectEqualStrings("no valid QR finder pattern triad detected in image", std.mem.span(TestApi.decodeImageStrerror(-31)));
     try testing.expectEqualStrings("degenerate geometry or invalid transformation while sampling image", std.mem.span(TestApi.decodeImageStrerror(-32)));

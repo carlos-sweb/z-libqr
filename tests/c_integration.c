@@ -11,7 +11,7 @@ int main(void) {
     // 1. Verify Header Definitions
     assert(ZQR_VERSION_MAJOR == 1);
     assert(ZQR_VERSION_MINOR == 6);
-    assert(ZQR_VERSION_PATCH == 2);
+    assert(ZQR_VERSION_PATCH == 4);
     assert(ZQR_OK == 0);
     assert(ZQR_ERR_DATA_TOO_LONG == -1);
     assert(ZQR_ERR_VERSION_EXCEEDS_TIER == -2);
