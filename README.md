@@ -190,7 +190,8 @@ pub const RenderOptions = struct {
 
 - `calcSvgLen` / `renderSvgBuffer` / `renderSvg` via `zqr.render`.
 - Produces clean vector paths with subpath consolidation.
-- When `dot_shape = .rounded`, uses continuous smooth path outlines with rounded corners; when `eye_shape = .rounded`, generates concentric circles with exact 1:1:3:1:1 proportions.
+- When `dot_shape = .rounded`, uses exact per-module Bézier cubic fillets ($r = 0.40 \times \text{scale}$, $\kappa = 0.55228475$) on exposed exterior corners while adjacent dark modules fuse seamlessly with straight 90° edges (zero filters, zero strokes, pure vector geometry matching PNG SDF logic at >99.9% pixel parity).
+- When `eye_shape = .rounded`, generates concentric circles with exact 1:1:3:1:1 proportions.
 
 ### PNG (optional libpng)
 
@@ -509,8 +510,8 @@ Add to your consumer `build.zig.zon` (URL + hash; not a registry package):
 ```zig
 .dependencies = .{
     .zqr = .{
-        .url = "git+https://github.com/carlos-sweb/z-libqr?ref=v1.5.0#314991e55d53b97f04712d6f443e74daa16e886e",
-        .hash = "z_libqr-1.5.0-P-K0qtdcCACgsLzEb3-aR1Ne2XDR9wrrIVeQ41ZD1Y7g",
+        .url = "git+https://github.com/carlos-sweb/z-libqr?ref=v1.6.3#86f7aad8db3858cf833b2aebe5fab2461deab718",
+        .hash = "z_libqr-1.6.3-P-K0quzwCADc8uelFA22CrQSRbDWdo0A6SB0ze-HiVIZ",
     },
 },
 ```
@@ -560,6 +561,8 @@ Then `@import("zqr")` in application code. A path-based local example lives in [
 - **v1.3.0:** SVG (zero-dep) and PNG (`libpng` wrapper) rendering.
 - **v1.4.0:** Model 2 matrix decoder (Phase A) and C decode ABI; `zqr_decode_result` 28 B.
 - **v1.5.0:** Image decoder (Phase B); `decode_image` / `image_buffer_len` C symbols (16 per tier).
+- **v1.6.0:** Rendering options (custom `#RRGGBBAA` colors, `dot_shape` square/rounded, `eye_shape` square/rounded, C ABI `_ex` functions).
+- **v1.6.3:** SVG geometric parity with PNG SDF logic (pure cubic Bézier vector geometry, zero `<filter>`/`stroke`, 99.95% pixel parity).
 
 Semver: `v1.x` is backward-compatible for documented APIs; majors may break.
 
