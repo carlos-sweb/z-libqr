@@ -41,6 +41,7 @@ fn writeAppend(dest: []u8, offset: *usize, src: []const u8) !void {
 
 /// Checks if module at (r, c) is part of any of the 3 corner finder patterns (7x7).
 pub fn isFinderModule(r: usize, c: usize, size: usize) bool {
+    if (size < 21) return false;
     // Top-Left (0..6, 0..6)
     if (r < 7 and c < 7) return true;
     // Top-Right (0..6, size-7..size-1)
@@ -111,14 +112,6 @@ fn renderSvgInternal(matrix: QrMatrix, opts: RenderOptions, buf: ?[]u8) !usize {
     const is_blob_mode = (opts.dot_shape == .rounded);
     const is_rounded_eye = (opts.eye_shape == .rounded);
 
-    if (is_blob_mode) {
-        const std_dev = @max(0.5, f_scale * 0.20);
-        const filter_def = std.fmt.bufPrint(&tmp, "<defs>\n<filter id=\"zqr-blob\" x=\"-20%\" y=\"-20%\" width=\"140%\" height=\"140%\" color-interpolation-filters=\"sRGB\">\n<feGaussianBlur in=\"SourceGraphic\" stdDeviation=\"{d:.2}\" result=\"blur\"/>\n<feColorMatrix in=\"blur\" mode=\"matrix\" values=\"1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 25 -14\"/>\n</filter>\n</defs>\n", .{
-            std_dev,
-        }) catch return error.BufferTooSmall;
-        if (buf) |b| try writeAppend(b, &offset, filter_def) else offset += filter_def.len;
-    }
-
     // 1. Render data modules (and classic finders if eye_shape == .square)
     if (!is_blob_mode) {
         // Classic square runs
@@ -151,43 +144,258 @@ fn renderSvgInternal(matrix: QrMatrix, opts: RenderOptions, buf: ?[]u8) !usize {
         const path_close = "\"/>\n";
         if (buf) |b| try writeAppend(b, &offset, path_close) else offset += path_close.len;
     } else {
-        // Blob / smooth QR mode:
-        // Render data modules (excluding finder patterns) wrapped in <g filter="url(#zqr-blob)">
-        const group_open = std.fmt.bufPrint(&tmp, "<g filter=\"url(#zqr-blob)\">\n<path fill=\"{s}\" d=\"", .{fg_str}) catch return error.BufferTooSmall;
-        if (buf) |b| try writeAppend(b, &offset, group_open) else offset += group_open.len;
+        // Geometric Bézier Blob mode (pure vector, zero filters, zero stroke):
+        // 1. Detect connected components of dark modules (4-connectivity).
+        // 2. Isolated modules (component size == 1) render as <circle>.
+        // 3. Multi-module blobs render as <path fill="{fg}" fill-rule="evenodd" d="..."> with Bézier fillets on convex and concave corners.
+        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
 
-        var y: usize = 0;
-        while (y < size) : (y += 1) {
-            var x: usize = 0;
-            while (x < size) {
-                const in_finder = isFinderModule(y, x, size);
-                if (matrix.modules[y * size + x] == 1 and !in_finder) {
-                    const start_x = x;
-                    while (x < size and matrix.modules[y * size + x] == 1 and !isFinderModule(y, x, size)) : (x += 1) {}
-                    const run_len = x - start_x;
+        const is_dark = try allocator.alloc(bool, size * size);
+        for (0..size) |r| {
+            for (0..size) |c| {
+                const in_finder = isFinderModule(r, c, size);
+                is_dark[r * size + c] = (matrix.modules[r * size + c] == 1 and !in_finder);
+            }
+        }
 
-                    const px_x = (start_x + qz) * scale;
-                    const px_y = (y + qz) * scale;
-                    const px_w = run_len * scale;
-                    const px_h = scale;
+        const visited = try allocator.alloc(bool, size * size);
+        @memset(visited, false);
 
-                    const cmd = std.fmt.bufPrint(&tmp, "M{d},{d}h{d}v{d}h-{d}z ", .{ px_x, px_y, px_w, px_h, px_w }) catch return error.BufferTooSmall;
-                    if (buf) |b| try writeAppend(b, &offset, cmd) else offset += cmd.len;
-                } else {
-                    x += 1;
+        const Point = struct { x: i32, y: i32 };
+        var components: std.ArrayList(std.ArrayList(Point)) = .empty;
+        var queue: std.ArrayList(Point) = .empty;
+
+        for (0..size) |r| {
+            for (0..size) |c| {
+                const idx = r * size + c;
+                if (is_dark[idx] and !visited[idx]) {
+                    visited[idx] = true;
+                    var comp: std.ArrayList(Point) = .empty;
+                    try comp.append(allocator, .{ .x = @intCast(c), .y = @intCast(r) });
+                    queue.clearRetainingCapacity();
+                    try queue.append(allocator, .{ .x = @intCast(c), .y = @intCast(r) });
+
+                    while (queue.items.len > 0) {
+                        const curr = queue.orderedRemove(0);
+                        const dirs = [_]struct { dx: i32, dy: i32 }{
+                            .{ .dx = 1, .dy = 0 },
+                            .{ .dx = -1, .dy = 0 },
+                            .{ .dx = 0, .dy = 1 },
+                            .{ .dx = 0, .dy = -1 },
+                        };
+                        for (dirs) |d| {
+                            const nx = curr.x + d.dx;
+                            const ny = curr.y + d.dy;
+                            if (nx >= 0 and nx < size and ny >= 0 and ny < size) {
+                                const nidx = @as(usize, @intCast(ny)) * size + @as(usize, @intCast(nx));
+                                if (is_dark[nidx] and !visited[nidx]) {
+                                    visited[nidx] = true;
+                                    try comp.append(allocator, .{ .x = nx, .y = ny });
+                                    try queue.append(allocator, .{ .x = nx, .y = ny });
+                                }
+                            }
+                        }
+                    }
+                    try components.append(allocator, comp);
                 }
             }
         }
 
-        const group_close = "\"/>\n</g>\n";
-        if (buf) |b| try writeAppend(b, &offset, group_close) else offset += group_close.len;
+        const stride = size + 1;
+        const total_edges = (stride * stride) * 4;
+        const edge_exists = try allocator.alloc(bool, total_edges);
+        @memset(edge_exists, false);
+        const edge_visited = try allocator.alloc(bool, total_edges);
+        @memset(edge_visited, false);
+        const in_comp = try allocator.alloc(bool, size * size);
+        @memset(in_comp, false);
 
-        // If eyes are square, render finder patterns outside the filter so they maintain crisp edges
+        const r_fillet = f_scale * 0.40;
+        const kappa: f64 = 0.55228475;
+        const dir_dx = [_]i32{ 1, 0, -1, 0 };
+        const dir_dy = [_]i32{ 0, 1, 0, -1 };
+
+        for (components.items) |comp| {
+            if (comp.items.len == 1) {
+                // Isolated module: <circle>
+                const p = comp.items[0];
+                const cx = (@as(f64, @floatFromInt(p.x + @as(i32, @intCast(qz)))) + 0.5) * f_scale;
+                const cy = (@as(f64, @floatFromInt(p.y + @as(i32, @intCast(qz)))) + 0.5) * f_scale;
+                const r_circ = f_scale * 0.45;
+                const cmd = std.fmt.bufPrint(&tmp, "<circle cx=\"{d:.2}\" cy=\"{d:.2}\" r=\"{d:.2}\" fill=\"{s}\"/>\n", .{
+                    cx, cy, r_circ, fg_str,
+                }) catch return error.BufferTooSmall;
+                if (buf) |b| try writeAppend(b, &offset, cmd) else offset += cmd.len;
+            } else {
+                for (comp.items) |p| {
+                    in_comp[@as(usize, @intCast(p.y)) * size + @as(usize, @intCast(p.x))] = true;
+                }
+
+                const CompEdge = struct { x: i32, y: i32, d: usize };
+                var comp_edges: std.ArrayList(CompEdge) = .empty;
+                for (comp.items) |p| {
+                    const cx = p.x;
+                    const cy = p.y;
+                    // Top: d=0
+                    if (cy == 0 or !in_comp[@as(usize, @intCast(cy - 1)) * size + @as(usize, @intCast(cx))]) {
+                        const eid = (@as(usize, @intCast(cy)) * stride + @as(usize, @intCast(cx))) * 4 + 0;
+                        edge_exists[eid] = true;
+                        edge_visited[eid] = false;
+                        try comp_edges.append(allocator, .{ .x = cx, .y = cy, .d = 0 });
+                    }
+                    // Right: d=1
+                    if (cx + 1 == size or !in_comp[@as(usize, @intCast(cy)) * size + @as(usize, @intCast(cx + 1))]) {
+                        const eid = (@as(usize, @intCast(cy)) * stride + @as(usize, @intCast(cx + 1))) * 4 + 1;
+                        edge_exists[eid] = true;
+                        edge_visited[eid] = false;
+                        try comp_edges.append(allocator, .{ .x = cx + 1, .y = cy, .d = 1 });
+                    }
+                    // Bottom: d=2
+                    if (cy + 1 == size or !in_comp[@as(usize, @intCast(cy + 1)) * size + @as(usize, @intCast(cx))]) {
+                        const eid = (@as(usize, @intCast(cy + 1)) * stride + @as(usize, @intCast(cx + 1))) * 4 + 2;
+                        edge_exists[eid] = true;
+                        edge_visited[eid] = false;
+                        try comp_edges.append(allocator, .{ .x = cx + 1, .y = cy + 1, .d = 2 });
+                    }
+                    // Left: d=3
+                    if (cx == 0 or !in_comp[@as(usize, @intCast(cy)) * size + @as(usize, @intCast(cx - 1))]) {
+                        const eid = (@as(usize, @intCast(cy + 1)) * stride + @as(usize, @intCast(cx))) * 4 + 3;
+                        edge_exists[eid] = true;
+                        edge_visited[eid] = false;
+                        try comp_edges.append(allocator, .{ .x = cx, .y = cy + 1, .d = 3 });
+                    }
+                }
+
+                const path_open = std.fmt.bufPrint(&tmp, "<path fill=\"{s}\" fill-rule=\"evenodd\" d=\"", .{fg_str}) catch return error.BufferTooSmall;
+                if (buf) |b| try writeAppend(b, &offset, path_open) else offset += path_open.len;
+
+                for (comp_edges.items) |start_edge| {
+                    const seid = (@as(usize, @intCast(start_edge.y)) * stride + @as(usize, @intCast(start_edge.x))) * 4 + start_edge.d;
+                    if (edge_visited[seid]) continue;
+
+                    var raw_loop: std.ArrayList(Point) = .empty;
+                    try raw_loop.append(allocator, .{ .x = start_edge.x, .y = start_edge.y });
+
+                    var curr_x = start_edge.x + dir_dx[start_edge.d];
+                    var curr_y = start_edge.y + dir_dy[start_edge.d];
+                    var prev_d = start_edge.d;
+                    edge_visited[seid] = true;
+
+                    while (curr_x != start_edge.x or curr_y != start_edge.y) {
+                        try raw_loop.append(allocator, .{ .x = curr_x, .y = curr_y });
+
+                        const d_right = (prev_d + 1) % 4;
+                        const d_straight = prev_d;
+                        const d_left = (prev_d + 3) % 4;
+
+                        var chosen_d: ?usize = null;
+                        const cand_dirs = [_]usize{ d_right, d_straight, d_left };
+                        for (cand_dirs) |d| {
+                            const eid = (@as(usize, @intCast(curr_y)) * stride + @as(usize, @intCast(curr_x))) * 4 + d;
+                            if (edge_exists[eid] and !edge_visited[eid]) {
+                                chosen_d = d;
+                                edge_visited[eid] = true;
+                                break;
+                            }
+                        }
+
+                        if (chosen_d) |cd| {
+                            prev_d = cd;
+                            curr_x += dir_dx[cd];
+                            curr_y += dir_dy[cd];
+                        } else {
+                            break;
+                        }
+                    }
+
+                    const lk = raw_loop.items.len;
+                    if (lk >= 4) {
+                        var corners: std.ArrayList(Point) = .empty;
+                        for (0..lk) |i| {
+                            const p_prev = raw_loop.items[(i + lk - 1) % lk];
+                            const p_curr = raw_loop.items[i];
+                            const p_next = raw_loop.items[(i + 1) % lk];
+                            const d1x = p_curr.x - p_prev.x;
+                            const d1y = p_curr.y - p_prev.y;
+                            const d2x = p_next.x - p_curr.x;
+                            const d2y = p_next.y - p_curr.y;
+                            if (d1x != d2x or d1y != d2y) {
+                                try corners.append(allocator, p_curr);
+                            }
+                        }
+
+                        const ck = corners.items.len;
+                        if (ck >= 4) {
+                            for (0..ck) |i| {
+                                const prev_c = corners.items[(i + ck - 1) % ck];
+                                const curr_c = corners.items[i];
+                                const next_c = corners.items[(i + 1) % ck];
+
+                                const vin_x = curr_c.x - prev_c.x;
+                                const vin_y = curr_c.y - prev_c.y;
+                                const lin: f64 = @floatFromInt(@max(@abs(vin_x), @abs(vin_y)));
+                                const uin_x = @as(f64, @floatFromInt(vin_x)) / lin;
+                                const uin_y = @as(f64, @floatFromInt(vin_y)) / lin;
+
+                                const vout_x = next_c.x - curr_c.x;
+                                const vout_y = next_c.y - curr_c.y;
+                                const lout: f64 = @floatFromInt(@max(@abs(vout_x), @abs(vout_y)));
+                                const uout_x = @as(f64, @floatFromInt(vout_x)) / lout;
+                                const uout_y = @as(f64, @floatFromInt(vout_y)) / lout;
+
+                                const vpx_x = (@as(f64, @floatFromInt(curr_c.x + @as(i32, @intCast(qz))))) * f_scale;
+                                const vpx_y = (@as(f64, @floatFromInt(curr_c.y + @as(i32, @intCast(qz))))) * f_scale;
+
+                                const ax = vpx_x - r_fillet * uin_x;
+                                const ay = vpx_y - r_fillet * uin_y;
+                                const bx = vpx_x + r_fillet * uout_x;
+                                const by = vpx_y + r_fillet * uout_y;
+
+                                const cp1x = ax + kappa * r_fillet * uin_x;
+                                const cp1y = ay + kappa * r_fillet * uin_y;
+                                const cp2x = bx - kappa * r_fillet * uout_x;
+                                const cp2y = by - kappa * r_fillet * uout_y;
+
+                                if (i == 0) {
+                                    const cmd_m = std.fmt.bufPrint(&tmp, "M{d:.2},{d:.2} ", .{ ax, ay }) catch return error.BufferTooSmall;
+                                    if (buf) |b| try writeAppend(b, &offset, cmd_m) else offset += cmd_m.len;
+                                } else {
+                                    const cmd_l = std.fmt.bufPrint(&tmp, "L{d:.2},{d:.2} ", .{ ax, ay }) catch return error.BufferTooSmall;
+                                    if (buf) |b| try writeAppend(b, &offset, cmd_l) else offset += cmd_l.len;
+                                }
+
+                                const cmd_c = std.fmt.bufPrint(&tmp, "C{d:.2},{d:.2} {d:.2},{d:.2} {d:.2},{d:.2} ", .{
+                                    cp1x, cp1y, cp2x, cp2y, bx, by,
+                                }) catch return error.BufferTooSmall;
+                                if (buf) |b| try writeAppend(b, &offset, cmd_c) else offset += cmd_c.len;
+                            }
+                            const cmd_z = "Z ";
+                            if (buf) |b| try writeAppend(b, &offset, cmd_z) else offset += cmd_z.len;
+                        }
+                    }
+                }
+
+                const path_close = "\"/>\n";
+                if (buf) |b| try writeAppend(b, &offset, path_close) else offset += path_close.len;
+
+                for (comp.items) |p| {
+                    in_comp[@as(usize, @intCast(p.y)) * size + @as(usize, @intCast(p.x))] = false;
+                }
+                for (comp_edges.items) |e| {
+                    const eid = (@as(usize, @intCast(e.y)) * stride + @as(usize, @intCast(e.x))) * 4 + e.d;
+                    edge_exists[eid] = false;
+                }
+            }
+        }
+
+        // If eyes are square, render finder patterns outside the blob path with crisp geometry
         if (!is_rounded_eye) {
             const finder_path_open = std.fmt.bufPrint(&tmp, "<path fill=\"{s}\" d=\"", .{fg_str}) catch return error.BufferTooSmall;
             if (buf) |b| try writeAppend(b, &offset, finder_path_open) else offset += finder_path_open.len;
 
-            y = 0;
+            var y: usize = 0;
             while (y < size) : (y += 1) {
                 var x: usize = 0;
                 while (x < size) {
@@ -293,7 +501,7 @@ test "renderSvg default square matches golden pattern" {
     try testing.expect(std.mem.endsWith(u8, svg, "</svg>\n"));
 }
 
-test "renderSvg dot_shape = .rounded uses smooth blob filter" {
+test "renderSvg dot_shape = .rounded uses geometric Bézier contours" {
     const mods = [_]u8{ 1, 1, 0, 1 };
     const m = QrMatrix{
         .version = 1,
@@ -310,10 +518,13 @@ test "renderSvg dot_shape = .rounded uses smooth blob filter" {
     });
     defer testing.allocator.free(svg);
 
-    try testing.expect(std.mem.indexOf(u8, svg, "<filter id=\"zqr-blob\"") != null);
-    try testing.expect(std.mem.indexOf(u8, svg, "<feGaussianBlur") != null);
-    try testing.expect(std.mem.indexOf(u8, svg, "<feColorMatrix") != null);
-    try testing.expect(std.mem.indexOf(u8, svg, "filter=\"url(#zqr-blob)\"") != null);
+    // Pure vector geometry: NO filter, NO stroke!
+    try testing.expect(std.mem.indexOf(u8, svg, "<filter") == null);
+    try testing.expect(std.mem.indexOf(u8, svg, "stroke-width") == null);
+    try testing.expect(std.mem.indexOf(u8, svg, "stroke-linejoin") == null);
+    // Multi-module L-shape has Cubic Bézier curves 'C'
+    try testing.expect(std.mem.indexOf(u8, svg, "fill-rule=\"evenodd\"") != null);
+    try testing.expect(std.mem.indexOf(u8, svg, "C") != null);
 }
 
 test "renderSvg eye_shape = .rounded uses 3 concentric circles per finder" {

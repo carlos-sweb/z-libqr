@@ -11,7 +11,7 @@ int main(void) {
     // 1. Verify Header Definitions
     assert(ZQR_VERSION_MAJOR == 1);
     assert(ZQR_VERSION_MINOR == 6);
-    assert(ZQR_VERSION_PATCH == 1);
+    assert(ZQR_VERSION_PATCH == 2);
     assert(ZQR_OK == 0);
     assert(ZQR_ERR_DATA_TOO_LONG == -1);
     assert(ZQR_ERR_VERSION_EXCEEDS_TIER == -2);
@@ -243,9 +243,11 @@ int main(void) {
     rc = zqr_t1_render_svg_ex(&m1, &ex_opts, ex_svg_buf, ex_svg_len, &written_len);
     assert(rc == ZQR_OK);
     assert(strstr(ex_svg_buf, "<circle") != NULL); // Eye shape rounded uses <circle
-    assert(strstr(ex_svg_buf, "filter=\"url(#zqr-blob)\"") != NULL); // Dot shape rounded uses blob filter
-    assert(strstr(ex_svg_buf, "<feGaussianBlur") != NULL);
-    assert(strstr(ex_svg_buf, "<feColorMatrix") != NULL);
+    assert(strstr(ex_svg_buf, "<filter") == NULL); // Pure vector: zero filters!
+    assert(strstr(ex_svg_buf, "stroke-width") == NULL); // Zero strokes!
+    assert(strstr(ex_svg_buf, "stroke-linejoin") == NULL);
+    assert(strstr(ex_svg_buf, "fill-rule=\"evenodd\"") != NULL); // Geometric Bézier contour
+    assert(strstr(ex_svg_buf, " C") != NULL); // Cubic Bézier fillets on corners
     assert(strstr(ex_svg_buf, "#123456") != NULL); // Custom foreground
     assert(strstr(ex_svg_buf, "#FEDCBA") != NULL); // Custom background
     free(ex_svg_buf);
