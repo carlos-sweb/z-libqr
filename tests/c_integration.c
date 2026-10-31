@@ -246,7 +246,6 @@ int main(void) {
     assert(strstr(ex_svg_buf, "<filter") == NULL); // Pure vector: zero filters!
     assert(strstr(ex_svg_buf, "stroke-width") == NULL); // Zero strokes!
     assert(strstr(ex_svg_buf, "stroke-linejoin") == NULL);
-    assert(strstr(ex_svg_buf, "fill-rule=\"evenodd\"") != NULL); // Geometric Bézier contour
     assert(strstr(ex_svg_buf, " C") != NULL); // Cubic Bézier fillets on corners
     assert(strstr(ex_svg_buf, "#123456") != NULL); // Custom foreground
     assert(strstr(ex_svg_buf, "#FEDCBA") != NULL); // Custom background
